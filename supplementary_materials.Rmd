@@ -1,0 +1,2857 @@
+---
+title: "supplementary materials"
+author: "Bettega Francois"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:  
+    pdf_document: 
+      keep_tex: yes
+      toc: true
+      toc_depth: 3
+    keep_tex:  TRUE
+bibliography: stage_M2.bib
+csl: vancouver.csl
+link-citations: true
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "rapport") })
+---
+
+
+
+```{r setup, include=FALSE, message = FALSE, warning = FALSE} 
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+##########################################################
+##                    packages                          ##
+##########################################################
+library(data.table)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(DiagrammeR)
+library(DiagrammeRsvg)
+library(rsvg)
+library(ipw)
+library(broom)
+library(ggpubr)
+library(knitr)
+library(kableExtra)
+library(cluster) # test découpage
+library(modelr)
+library(nnet)
+library(xtable)
+library(caret)
+conflicted::conflict_prefer("filter", "dplyr")
+#library(ipw)
+
+##########################################################
+##                    function                          ##
+##########################################################
+source("source_francois.R", 
+       encoding = "UTF-8")
+source("function_spe_stage.R",
+       encoding = "UTF-8")
+##########################################################
+##                    donnee                            ##
+##########################################################
+
+df <- read_rds("data/genere/data_prett.rds") 
+nb_core <- parallel::detectCores() - 1 # nb de coeur pouyr la parréllélisation
+
+# nb_visite <- df %>% group_by(id_patient) %>% summarise(max = max(num_visite) ,n = n())
+
+
+visite <-   df %>% 
+  filter(num_visite == 1) %>% #selection d'une seul visite
+  group_by(Mesure_unique_INS_visite_Max) %>% 
+  summarise(n=n()) %>%  
+  t.df(.,"Mesure_unique_INS_visite_Max") %>%
+  select(-key) 
+
+colonnes_ss_variance <-  df %>% 
+  select_if(function(col) n_distinct(col,na.rm = TRUE) <= 1) %>%
+  colnames() # retire les variables visite init sans valeurs toute = a 0
+
+
+df <- df %>% 
+  select(-Mesure_unique_INS_visite_Max) %>%  
+  select_if(function(col) n_distinct(col, na.rm = TRUE) > 1)
+
+nb_pat <-  df %>% 
+  select(id_patient) %>%
+  n_distinct() 
+
+confunding_diagram <- {"digraph R {
+ rankdir=LR;
+ secret_node2[height=0, width=0, margin=0,shape=point, style=invis]; 
+ secre_right [style=invisible]; 
+ somnolence  [label = 'Outcome: \nDaytime sleepiness' , shape = rectangle , style=filled, fillcolor='#9ACEEB'] ;
+ observance  [label = 'Factor of exposure: \noadherence', shape = rectangle  , style=filled, fillcolor='#9ACEEB']  ;
+ Age [label = 'Age'  , style=filled, fillcolor=red];
+ Sex [label = 'Gender'  , style=filled, fillcolor=red];
+ BMI [label = 'BMI'  , style=filled, fillcolor=red];
+ secre_left [style=invisible]; 
+ secre_left_BMI [style=invisible]; 
+ secre_right_BMI [style=invisible]; 
+ secre_left_sex [style=invisible]; 
+ secre_right_sex [style=invisible]; 
+ {rank=source; observance secre_left secre_left_sex secre_left_BMI} ;
+ {rank=sink; somnolence secre_right secre_right_sex secre_right_BMI};
+ {rank=same;secret_node2 Age Sex BMI} 
+ 
+ observance ->  secret_node2[arrowhead = none,penwidth = 5] ;
+ secret_node2 -> somnolence [penwidth = 5];
+
+ secre_left -> Age[style=invis];
+ secre_left -> observance[style=invis];
+ secre_right -> somnolence [style=invis];
+ Age -> secre_right  [style=invis];
+ Age -> secret_node2 [style=invis,minlen='2.9'];
+ Age -> observance;
+ Age ->  somnolence;
+ 
+ Sex ->  Age [style=invis];
+ Sex -> observance;
+ Sex ->  somnolence;
+ Sex -> secre_right_sex [style=invis];
+ secre_left_sex -> Sex [style=invis];
+ secre_left_sex -> secre_left [style=invis];
+ 
+ 
+ BMI ->  Sex [style=invis];
+ BMI -> observance;
+ BMI ->  somnolence;
+ BMI -> secre_right_BMI [style=invis];
+ secre_left_BMI -> BMI [style=invis];
+ secre_left_BMI -> secre_left_sex [style=invis];
+}"}
+grViz(confunding_diagram) %>% 
+  export_svg %>%
+  charToRaw %>%
+  rsvg_pdf("graph/cofunding_factor.pdf")
+include_graphics("graph/cofunding_factor.pdf")
+```
+
+
+
+
+```{r}
+df <- df %>% 
+  replace_na(list(Vis_init_ATC_id_typeDiabete = 0,
+                  ATC_id_typeDiabete = 0)) 
+```
+
+
+
+
+
+
+
+```{r liste_var_init}
+## Création des variables temps indépendant
+var_mesure_unique <- df %>%
+  select(contains("Mesure_unique_")) %>% 
+  colnames() # %>% gsub("Mesure_unique_","",.)  
+var_visit_init <- df %>%
+  select(contains("Vis_init_")) %>% 
+  colnames() # %>% gsub("Mesure_unique_","",.)  
+
+var_non_visit_init <-  df %>%
+  select(!contains("Vis_init_")) %>% 
+  colnames()
+# print.vecteur(var_mesure_unique)
+```
+
+
+
+```{r creation_data_frame_example}
+## suppression de la premieres visites 
+df_example_mesure_uni_init <- df %>% 
+  select(id_patient,
+         num_visite,
+         Mesure_unique_CHA_id_sexe,
+         contains("CHA_age"),
+         contains("CHA_poids")) %>%
+  filter(id_patient < 10)  %>% 
+  mutate_at(vars(contains("_age")),~formatC(., format = "f", digits = 1)) 
+```
+
+
+
+
+```{r choix_pat_et_var_a_inclure}
+df_inclusion <- df %>% 
+  filter(num_visite != 1) 
+```
+
+
+
+
+```{r presence_SAS_et_obs} 
+
+# Critère d'inclusion
+visite_seuil <- 2
+df_visite <- df_inclusion %>%
+  filter(num_visite <= visite_seuil)
+
+df_SAS <-  df_visite  %>% 
+  filter(!is.na(Vis_init_INS_IAH),
+         Vis_init_INS_IAH >= 5) #INS_IAH
+
+perte_SAS_pat <- df_visite %>% 
+  filter(is.na(Vis_init_INS_IAH) | Vis_init_INS_IAH < 5) %>%  #INS_IAH
+  select(id_patient) %>%  n_distinct()
+
+
+
+nb_SAS_pat <- n_distinct(df_SAS$id_patient)
+
+
+
+df_obs <- df_SAS %>% 
+  group_by(id_patient)  %>% 
+  mutate(INS_observance = sum(is.na(PPC_observanceMoy_finale))) %>%
+  filter(INS_observance == 0 ) %>% 
+  select(-INS_observance) # retrait de la variables instrumentale
+
+
+perte_obs_pat <-  df_SAS %>% 
+  group_by(id_patient) %>% 
+  filter(num_visite != 1 ) %>% 
+  mutate(INS_observance = sum(is.na(PPC_observanceMoy_finale))) %>%  
+  filter(INS_observance != 0 ) %>% 
+  select(id_patient) %>% 
+  n_distinct()
+
+nb_obs_pat <-  n_distinct(df_obs$id_patient)
+```
+
+
+
+
+
+
+```{r choix_outcome}
+
+# Choix de l'outcome  
+df_choix_outcome <-  df_obs %>% 
+  group_by(id_patient) %>%
+  mutate(naEPW = sum(is.na(SYM_echelleEpworth)) == 0 ,
+         nasysto =  sum(is.na(CHA_PASystolique)) == 0,
+         nadiasto =  sum(is.na(CHA_PADiastolique)) == 0 ,
+         PA_ok =  sum(!is.na(CHA_PASystolique),!is.na(CHA_PADiastolique))==2 ,
+         PAna =  sum(is.na(CHA_PASystolique),is.na(CHA_PADiastolique))!=2) %>% 
+  distinct(id_patient , .keep_all = TRUE)
+
+
+df_EPW <-  df_obs %>%
+   group_by(id_patient) %>%
+   mutate(naEPW = sum(is.na(SYM_echelleEpworth)|is.na(Vis_init_SYM_echelleEpworth))) %>% # utile car permet de scale sur plus de rendez-vous
+   filter(naEPW == 0) %>% 
+   select(-naEPW) %>% 
+   mutate(SYM_echelleEpworth = Vis_init_SYM_echelleEpworth - SYM_echelleEpworth) %>% 
+  select(-Vis_init_SYM_echelleEpworth)%>% 
+   ungroup() 
+
+
+#sum(is.na(df_EPW$SYM_echelleEpworth))
+
+perte_EPW_pat <- df_obs %>%
+  group_by(id_patient) %>%
+   mutate(naEPW = sum(is.na(SYM_echelleEpworth)|is.na(Vis_init_SYM_echelleEpworth))) %>% # utile car permet de scale sur plus de rendez-vous
+  filter(naEPW != 0) %>% select(id_patient) %>%
+  n_distinct()
+
+nb_EPW_pat <- n_distinct(df_EPW$id_patient)
+```
+
+```{r creation_var_nom_out_come_et_expo}
+name_expo <- paste0(quote(INS_obs_categ))
+name_outcome <- paste0(quote(SYM_echelleEpworth))
+```
+
+
+
+
+```{r  discretisation_obs_clusturing}
+Observance_numeric_sav <- df_EPW
+res.hc <- hclust(dist(df_EPW  %>% select(PPC_observanceMoy_finale)),  method = "ward.D2")
+INS_OBS_cluster <- cutree(res.hc,k = 5)
+
+df_obs_categ_2 <- df_EPW %>% 
+  mutate(INS_obs_categ = INS_OBS_cluster)  
+
+```
+
+
+```{r print_vec_discretisation_obs_clusturing}
+cut_cluster <- df_obs_categ_2 %>% 
+  group_by(INS_obs_categ) %>% 
+  summarise(min = min(PPC_observanceMoy_finale), max = max(PPC_observanceMoy_finale),.groups = "drop" ) %>% 
+  arrange(max)
+
+df_obs_categ_2 <- df_obs_categ_2 %>%  select(-PPC_observanceMoy_finale)
+
+obs_cut_temp3 <- c(0,cut_cluster$max)
+```
+
+
+```{r box_plot_discretisation_obs_clusturing}
+eval_decoupage_cluster <- function_box_plot_expo_func(df_obs_categ_2,name_expo,name_outcome)
+eval_decoupage_cluster$plot_test
+```
+
+
+```{r choix_final_discret_obs}
+vec_cut <- obs_cut_temp3
+df_obs_categ <- df_obs_categ_2
+```
+
+
+
+# Selections des variables et individus pour les modèle  
+
+```{r GESTION_date_et_id}
+date_ddn <- df_obs_categ %>% 
+  ungroup() %>% 
+  select(which(sapply(.,is.Date)),contains("date"),contains("ddn")#,contains("INS_tmp_entre_rdv")
+         ) %>% 
+  colnames()
+
+id_idv <- df_obs_categ %>% 
+  ungroup() %>% 
+  select(contains("id_"),contains("idv")) %>% 
+  select(-id_patient,
+         -Mesure_unique_ATC_id_typeDiabete,
+         -PPC_id_typeMasque,
+         -Mesure_unique_CHA_id_sexe) %>% 
+  colnames()
+
+if(visite_seuil == 2) df_obs_categ <-  df_obs_categ %>% select(-num_visite)
+```
+
+
+```{r remove_col_date_id}
+df_ss_var_select_man <- df_obs_categ  %>%   
+  ungroup() %>% 
+  select(-one_of(date_ddn),
+         -one_of(id_idv)) %>% 
+  mutate_all(as.numeric)
+
+
+
+charecter_col <- df_ss_var_select_man  %>% 
+  select_if((colSums(is.na(.)) == nrow(.)) ) %>%  
+  colnames()
+  
+# conserver une dataframe a part de la selection de variables 
+df_sav_temp <- df_ss_var_select_man %>% 
+  mutate_all(as.numeric) %>% 
+  select_if(!(colSums(is.na(.)) == nrow(.))) # remove char col dont je ne sais pas quoi faire de toutes manières
+ 
+
+
+```
+
+
+
+```{r retrait_colonnes_identique}
+
+Recherche_duplicata_column <- distinc_col(df_sav_temp )
+
+
+
+df_sav_temp <- Recherche_duplicata_column$df
+
+var_non_visit_init_sav_tem <-  df_sav_temp %>%
+  select(!contains("Vis_init_")) %>% 
+  colnames()
+
+col_ident <- Recherche_duplicata_column$colonne_suprime
+
+# Gestion des cas ou variables visit_init et var temps dep corrélé
+temp_tt_colonne_dupli <- lapply(seq_along(col_ident), function(x) {
+    court <- names(which.min(sapply(col_ident[[x]], nchar)))
+    restant <- str_remove(col_ident[x] %>% unlist(), court) 
+      if (all(restant %in% c("Vis_init_", ""))) {
+      court
+    }
+}) 
+
+
+duplicate_fact_init <- temp_tt_colonne_dupli %>% compact %>% unlist
+
+
+  
+duplicate_verif_manu <-   col_ident[lapply(temp_tt_colonne_dupli, function(x) is.null(x) ) %>% unlist()] 
+
+if (!is_empty(duplicate_verif_manu)) stop("vérif manuel a faire")
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+# valeurs manquante 
+nb_val_manq_par_var <- compte_na_par_var_par_grp(df_sav_temp,"id_patient",colnames(df_sav_temp)) 
+seuil_na <- 0.6
+frac_val_manq_par_var <- nb_val_manq_par_var %>% 
+  mutate_at(vars(-presence_na),list(~(./sum(.)))) %>% 
+  filter(presence_na == (visite_seuil - 1)) %>% select(-presence_na)
+trop_manquant <- frac_val_manq_par_var %>% select_if(. > 1-seuil_na ) %>% colnames()
+
+df_rm_na <- df_sav_temp %>% select(-all_of(trop_manquant),-id_patient)
+```
+
+```{r}
+
+Var_manquant_colnames <- df_rm_na %>% colnames()
+
+
+```
+
+
+
+
+
+
+```{r}
+# Gestions des colinéarité
+seuil_cor <- 0.7
+corelation_var_df <- df_rm_na  %>% select(all_of(Var_manquant_colnames))
+
+
+mat_cor <- cor(corelation_var_df  ,use =  "pairwise.complete.obs")
+
+var_cor <- which(abs(mat_cor) > seuil_cor & (row(mat_cor) != col(mat_cor)) ,arr.ind = TRUE) %>% 
+  as_tibble() %>% 
+  pivot_wider(names_from = row, values_from = col,values_fn = list(col = list)) %>%
+  t.df()
+
+
+var_correlle <- lapply(unique(
+  lapply(
+    lapply(split(var_cor, row.names(var_cor)), unlist),
+    function(x) sort(
+      as.numeric(
+        unique(x))
+      ))), 
+  function(x) colnames(mat_cor)[x])
+
+
+# Gestion des cas ou variables visit_init et var temps dep corrélé
+Var_corr_init_temp_dep <- lapply(var_correlle, function(x) {
+if (length(x) == 2){
+    court <- names(which.min(sapply(x, nchar)))
+    long <- names(which.max(sapply(x, nchar)))
+    different_part <- str_remove(long, court)
+    if (different_part == "Vis_init_") {
+      result <- court
+    }
+}}
+) %>% compact %>% unlist
+
+Var_corr_no_init_temp_dep <- lapply(var_correlle, function(x) {
+ if (length(x) == 2){
+    court <- names(which.min(sapply(x, nchar)))
+    long <- names(which.max(sapply(x, nchar)))
+    different_part <- str_remove(long, court)
+    if (different_part != "Vis_init_") {
+      result <- TRUE#c(court,long)
+    } else {result <- FALSE}
+ } else if (length(x) != 2) {
+   result <- TRUE
+ }
+  }
+) %>% 
+ # compact %>%
+  unlist
+
+
+# list of correlated variables
+Var_cor_select_manu <- var_correlle[Var_corr_no_init_temp_dep]  
+
+# variable choose from list above 
+Select_manu_cor <- c("Vis_init_CHA_BMI")
+
+
+
+var_cor_retire <- c(Var_corr_init_temp_dep, 
+                    select_manuel_verif(Var_cor_select_manu,Select_manu_cor))
+```
+
+
+
+```{r}
+Var_cor_colnames <- Var_manquant_colnames[Var_manquant_colnames %notin% var_cor_retire]
+
+
+
+df_ss_cor <- df_sav_temp %>% 
+  select(id_patient,all_of(name_outcome),all_of(name_expo),all_of(Var_cor_colnames))  
+
+```
+
+```{r variable_with_to_few_pat}
+not_numeric <- df_ss_cor %>% summarise_all(list(~n_distinct(.))) %>% 
+  t.df() %>% 
+  mutate(numeric = col_1 < 10) %>% 
+  filter(numeric) %>% 
+  select(key) %>% 
+  unlist(use.names = FALSE)
+
+nb_valeur_facteur_deuxieme_max <- function(col){
+  res <- sort(table(col),decreasing = TRUE)[2]
+  return(res)
+}
+
+poucent_pat_necessaire <- 20
+nb_pat_cut <- df_ss_cor %>% 
+  summarise_all(list(~sum(!is.na(.)) * poucent_pat_necessaire/100))  %>%
+  t.df() 
+
+moda_trop_peu_pat_moda_2 <- df_ss_cor %>% 
+  select(all_of(not_numeric)) %>%  
+  summarise_all(list(~nb_valeur_facteur_deuxieme_max(.))) %>%
+  t.df() %>% 
+  inner_join(nb_pat_cut,by = "key" ) %>% 
+  setNames( c("var", "second_max","cut_nb_pat")) %>% 
+  filter(second_max < cut_nb_pat) %>% 
+  select(var) %>% 
+  unlist(use.names = FALSE)
+
+near_zero_var <- df_ss_cor  %>% 
+  select(all_of(nearZeroVar(.,names = TRUE))) %>% colnames()
+moda_trop_peu_pat <- c(moda_trop_peu_pat_moda_2,near_zero_var)
+```
+
+
+
+```{r}
+Var_nb_pat_colnames <- Var_cor_colnames[Var_cor_colnames %notin% moda_trop_peu_pat]
+
+```
+
+
+```{r utilisation_20%_patient_select_var}
+
+## Selection des variables liée a l'outcome 
+set.seed(123)
+# patients use for variables select
+df_model_select_var <- df_sav_temp %>% group_by(INS_obs_categ) %>% slice_sample(prop= 0.2) %>% ungroup()
+# other patients
+df_analyse_final <- df_sav_temp %>% anti_join(df_model_select_var)
+
+# value for flow chart
+perte_select_var <- df_model_select_var %>% select(id_patient) %>% n_distinct()
+```
+
+```{r model_lin_lien_outcom_expo}
+model_lin <- df_model_select_var %>% select(-id_patient) %>%
+  select(all_of(Var_nb_pat_colnames))
+model_expo <- model_lin %>%  
+  select(-all_of(name_outcome)) %>% 
+  gather(measure, value, -all_of(name_expo)) %>%
+  mutate(value = as.numeric(value)) %>%
+  group_by(measure) %>% 
+  nest() %>%
+  ungroup() %>% 
+  mutate(fit = map(data, ~ glm(paste0(name_expo,"~ value"), data = .x), family = binomial(link = 'logit'),na.action = na.omit),
+         tidied = map(fit, tidy)) %>%
+  unnest(tidied) %>% 
+  filter(term != "(Intercept)") %>% # on elnlève l'intercept
+  select(-data,-fit,-term)  # retire les donnée
+
+
+model_outcome <- model_lin %>% 
+  select(-all_of(name_expo)) %>% 
+  gather(measure, value, -all_of(name_outcome)) %>%
+   mutate(value = as.numeric(value)) %>%
+  group_by(measure) %>% 
+  nest() %>%
+  ungroup() %>% 
+  mutate(fit = map(data, ~ glm(paste0(name_outcome,"~ value"), data = .x), family = gaussian(link = "identity"),na.action = na.omit),
+         tidied = map(fit, tidy)) %>%
+  unnest(tidied) %>% 
+  filter(term != "(Intercept)") %>% # on elnlève l'intercept
+  select(-data,-fit,-term)  # retire les donnée
+
+
+
+p_val_var <- model_expo %>% 
+inner_join(model_outcome, by= c("measure" = "measure")) %>% 
+  select(measure,contains("p.value"))
+
+
+P_val_out_come_colnames <- p_val_var %>% 
+  filter(p.value.y < 0.2) %>% 
+  select(measure) %>% 
+  unlist(use.names = FALSE) %>% 
+  sort
+
+P_val_out_come_et_expo_colnames <- p_val_var %>% 
+  filter(p.value.y < 0.2, p.value.x < 0.2)  %>% 
+  select(measure) %>%
+  unlist(use.names = FALSE) %>% 
+  sort
+```
+
+
+```{r}
+Var_model_outcome <- Var_nb_pat_colnames[Var_nb_pat_colnames %in% P_val_out_come_colnames]
+var_mod_pds <- Var_nb_pat_colnames[Var_nb_pat_colnames %in% P_val_out_come_et_expo_colnames]
+
+```
+
+
+# Imputation density plot
+
+```{r}
+# imputation
+df__pre_imput <- df_analyse_final  %>% 
+  select(id_patient,
+         all_of(name_outcome),
+         all_of(name_expo),
+         all_of(Var_model_outcome))
+  
+
+col_sans_NA <- df__pre_imput %>% select_if(colSums(is.na(.)) == 0) %>% colnames()
+
+table_resume_pre_impute <- table_resume_latex(df__pre_imput %>%
+  select(-id_patient) ,name_expo, "grp_obs")
+
+
+
+
+df__post_imput <- impute_si_changement(df__pre_imput,"data/genere/data_impute.rds")
+
+
+table_resume_post_impute <- table_resume_latex(df__post_imput %>% 
+  select(-id_patient) ,name_expo,"grp_obs")
+
+mice_object <- readRDS("data/genere/imputation_object.rds")
+mice::densityplot(mice_object)
+```
+
+
+
+
+
+```{r verif_imputation}
+### Vérification de  l'imputation   
+
+imputation_verif <- test_imputation(df__pre_imput,df__post_imput,name_expo)
+
+```
+
+```{r,results='asis'}
+imputation_verif$T_diff %>% 
+  arrondie_df %>% 
+  kable( longtable =  TRUE, 
+         booktabs = TRUE,
+             caption = "Table des différence entre les variables Pré et Post imputation") %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"), font_size = 7) 
+```
+
+
+
+
+```{r}
+df_final <- df__post_imput
+# perte_na_covar_pat <- n_distinct(df_sav_temp$id_patient) - n_distinct(df_final$id_patient)
+
+attributes(Observance_numeric_sav$id_patient) <- NULL # gestion d'un warning chiant
+observanve_num <- df_final  %>% 
+  inner_join(Observance_numeric_sav %>% filter(num_visite == visite_seuil) , by = "id_patient") %>%  
+  select(PPC_observanceMoy_finale)
+
+rm(Observance_numeric_sav)
+```
+
+
+
+
+
+
+```{r}
+patient_par_grp_expo  <- df_final %>% select(all_of(name_expo)) %>% table
+
+perte_visit_pat <- nb_pat - (visite %>% unlist() %>% rev() %>% cumsum %>% .[length(.) - (visite_seuil-1)])
+
+patient_perdu <- c(perte_visit_pat,
+                   perte_SAS_pat,
+                   perte_obs_pat,
+                   perte_EPW_pat,
+                   perte_select_var)
+critere <- c(paste0("Patient with less than " , visite_seuil ," visits"),
+             "Patient without Sleep apnea",
+             "Patient without adherence",
+             "Patient without Epworth",
+             "Patients use in variables selection")
+
+
+
+
+grViz(flow_chart(nb_pat,critere,patient_perdu,patient_par_grp_expo)) %>% 
+  export_svg %>%
+  charToRaw %>% 
+  rsvg_pdf("graph/graph_flow_chart_2_visites.pdf")
+```
+
+
+
+
+```{r test_et_sav_rds}
+# test 
+## pas de NA 
+if (df_final %>% summarise_all(~sum(is.na(.))) %>% rowSums(.) != 0 ) {
+  stop('Row avec Na')}
+# test pas de tb erectile chez les femmes
+
+if("Vis_init_SYM_troubleErection" %in% colnames(df_final)){
+if ((df_final  %>% filter(Mesure_unique_CHA_id_sexe == 0) %>% summarise(sum(Vis_init_SYM_troubleErection))) != 0  ) {
+  stop('trouble erectile chez les femmes')}
+}
+saveRDS(df_final, file = paste0("data/genere/data_prett_nb_vis_",visite_seuil,".rds"))
+
+
+#sauvegarde des variables du model de poids
+df_var_modele <- data.frame(Var_model_outcome = Var_model_outcome) %>% mutate(var_mod_pds = Var_model_outcome %in% var_mod_pds)
+
+
+saveRDS(df_var_modele, file = paste0("data/genere/model_",visite_seuil,".rds"))
+
+saveRDS(vec_cut, file = paste0("data/genere/obs_multinomial_en_heure.rds"))
+```
+
+
+
+```{r}
+df_modele_pds <- read_rds("data/genere/data_prett_nb_vis_2.rds") 
+```
+
+
+
+
+
+```{r}
+# pour le moment facteur gérer a la main a réfléchir
+donnee <- df_modele_pds %>% 
+  mutate_at( typages_function(df_modele_pds,10)$colonne_type$facteur,
+             factor) %>% 
+  select(-id_patient) %>% 
+  #mutate(INS_obs_categ = INS_obs_categ >2) %>% 
+  as.data.frame()
+```
+
+
+
+
+
+
+
+
+```{r}
+binaire <- calcule_pds_stage(donne = donnee,expo = INS_obs_categ,covar = var_mod_pds ,out_come = SYM_echelleEpworth)
+```
+
+
+
+
+
+
+```{r Creation_du_tableau_descriptif_des_variables}
+# Modèle multinomial de poids   
+# df_one_hot_encode <- donnee 
+alpha_tableau_resume <- 0.05
+  tableau_resume_ex <- head(donnee,500)
+  save(tableau_resume_ex,file = "tableau_resume_exemple.RData")
+  
+var_instrumental_name  <- c("INS_obs_categ" = "Adherence groups", "Vis_init_INS_IAH" = "Apnea hypopnea index", "INS_PPC_effet_ind" = "number of ADR types under CPAP", "INS_tmp_entre_rdv" = "Duration since diagnosis (year)")
+
+table_rename <- one_hot_fb(df__pre_imput,list_factor =  c(  "PPC_id_typeMasque"  )) %>% 
+  select(-id_patient) %>%  rename_variables(var_instrum_name = var_instrumental_name) 
+
+
+One_hot_encode_donnee <-table_rename %>% .$table_rename
+table_resume_latex_ss_escape <- table_resume_latex(df_one_hot_encode_fonc =  One_hot_encode_donnee,
+                                             name_expo_fonc = "Adherence groups",
+                                             nom_grp  = "Adherence grp",
+                                             p_val = TRUE,
+                                             alpha = alpha_tableau_resume)
+
+table_resume_html_prez <- table_resume_html(df_one_hot_encode_fonc =  One_hot_encode_donnee,
+                                             name_expo_fonc = "Adherence groups",
+                                             nom_grp  = "Adherence_grp",
+                                             p_val = TRUE,
+                                             alpha = alpha_tableau_resume)
+
+
+# récupér ation du vrai nom des var du modèle depoids
+label_var_mod_poids <- table_rename$complete_table %>% filter(str_detect(var_name, paste(var_mod_pds,collapse = '|'))) %>% select(Label) %>% unlist(use.names = FALSE)
+
+```
+
+
+
+
+
+# Estimations des poids 
+
+
+
+
+
+```{r  ,results='asis'}
+model_poids_df <- tidy(binaire$res_intermediaire$regression_modele_pds$regression_temps_ind)
+model_poids_df %>% 
+  select(-statistic) %>% 
+  arrondie_df %>% 
+  mutate(p.value = ifelse(p.value == "0.0e+00", 
+                          "< 0.001",p.value)) %>% 
+  arrange(term) %>% 
+  kable( longtable =  TRUE,
+         booktabs = TRUE,
+         caption = "Table des coeficient du modèle de poids") %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"),
+                font_size = 7)# %>%  landscape()
+```
+
+
+
+
+
+
+
+# modèle final d'estimations de la somenolence
+
+
+```{r choix_dernier_grp_comme_ref}
+
+donnee <- donnee %>% mutate_at(name_expo,list(~relevel(., ref = "4"#max(as.numeric(.)) ancienne version conservé comme référence si besoin
+                                                   )))
+```
+
+```{r}
+
+poids_mod_final <- binaire$res_intermediaire$poids$poids_tronc$poids_trunc_stab$`( 0.01;0.99 )`
+donne_mod_fin <- donnee
+model_final <- glm( SYM_echelleEpworth ~ .,
+                    data = donnee,
+                    family = gaussian(), 
+                    weight = poids_mod_final)
+iR_mod_final <- confint(model_final)
+```
+
+
+```{r ,results='asis'}
+summary(model_final)$coefficients %>% 
+  as.data.frame() %>% 
+  rownames_to_column %>% 
+  inner_join(iR_mod_final %>% 
+  as.data.frame()  %>% rownames_to_column() , by = "rowname") %>% 
+  column_to_rownames()  %>% 
+  arrondie_df() %>% 
+  rownames_to_column %>% 
+  rename(`Pr($>|t|$)` = `Pr(>|t|)`) %>% # gestion problème avec latex
+  mutate(`95\\% Confidence interval` = paste0("( ",`2.5 %`," ; ",`97.5 %`,  " )")) %>% 
+  select(rowname,Estimate,`95\\% Confidence interval` ,`Pr($>|t|$)`) %>% 
+  mutate(rowname = str_replace_all(rowname,"\\_","\\\\_")) %>% 
+  column_to_rownames()  %>% 
+  kable(label = "Table_model_final",
+       booktabs = TRUE,
+       escape = FALSE,
+       caption = "Table of final model adherence group coefficient") %>%
+  kable_styling(latex_options =  c( "repeat_header"), 
+                font_size = 7) 
+
+```
+```{r}
+
+summary(model_final)$coefficients %>% 
+  as.data.frame() %>% 
+  rownames_to_column %>% 
+  mutate(rowname = paste0("Adherence group ",
+                          str_remove_all(rowname,"INS_obs_categ"))) %>% 
+  column_to_rownames() %>% 
+  kable(longtable =  TRUE,
+        booktabs = TRUE,
+       caption = "Table des coeficient du modèle final pondéré") %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"), 
+                font_size = 7)
+  
+```
+
+
+
+# Code 
+
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, eval = FALSE}
+
+##########################################################
+##                    packages                          ##
+##########################################################
+library(data.table)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(DiagrammeR)
+library(DiagrammeRsvg)
+library(rsvg)
+library(ipw)
+library(broom)
+library(ggpubr)
+library(knitr)
+library(kableExtra)
+library(cluster) # test découpage
+library(modelr)
+library(nnet)
+library(xtable)
+library(caret)
+conflicted::conflict_prefer("filter", "dplyr")
+#library(ipw)
+
+##########################################################
+##                    function                          ##
+##########################################################
+source("source_francois.R", 
+       encoding = "UTF-8")
+source("function_spe_stage.R",
+       encoding = "UTF-8")
+
+
+##########################################################
+##                    donnee                            ##
+##########################################################
+
+df <- read_rds("data/genere/data_prett.rds") 
+nb_core <- parallel::detectCores() - 1 # nb de coeur pouyr la parréllélisation
+
+# nb_visite <- df %>% group_by(id_patient) %>% summarise(max = max(num_visite) ,n = n())
+
+
+visite <-   df %>% 
+  filter(num_visite == 1) %>% #selection d'une seul visite
+  group_by(Mesure_unique_INS_visite_Max) %>% 
+  summarise(n=n()) %>%  
+  t.df(.,"Mesure_unique_INS_visite_Max") %>%
+  select(-key) 
+
+colonnes_ss_variance <-  df %>% 
+  select_if(function(col) n_distinct(col,na.rm = TRUE) <= 1) %>%
+  colnames() # retire les variables visite init sans valeurs toute = a 0
+
+
+df <- df %>% 
+  select(-Mesure_unique_INS_visite_Max) %>%  
+  select_if(function(col) n_distinct(col, na.rm = TRUE) > 1)
+
+nb_pat <-  df %>% 
+  select(id_patient) %>%
+  n_distinct() 
+
+confunding_diagram <- {"digraph R {
+ rankdir=LR;
+ secret_node2[height=0, width=0, margin=0,shape=point, style=invis]; 
+ secre_right [style=invisible]; 
+ somnolence  [label = 'Outcome: \nDaytime sleepiness' , shape = rectangle , style=filled, fillcolor='#9ACEEB'] ;
+ observance  [label = 'Factor of exposure: \noadherence', shape = rectangle  , style=filled, fillcolor='#9ACEEB']  ;
+ Age [label = 'Age'  , style=filled, fillcolor=red];
+ Sex [label = 'Gender'  , style=filled, fillcolor=red];
+ BMI [label = 'BMI'  , style=filled, fillcolor=red];
+ secre_left [style=invisible]; 
+ secre_left_BMI [style=invisible]; 
+ secre_right_BMI [style=invisible]; 
+ secre_left_sex [style=invisible]; 
+ secre_right_sex [style=invisible]; 
+ {rank=source; observance secre_left secre_left_sex secre_left_BMI} ;
+ {rank=sink; somnolence secre_right secre_right_sex secre_right_BMI};
+ {rank=same;secret_node2 Age Sex BMI} 
+ 
+ observance ->  secret_node2[arrowhead = none,penwidth = 5] ;
+ secret_node2 -> somnolence [penwidth = 5];
+
+ secre_left -> Age[style=invis];
+ secre_left -> observance[style=invis];
+ secre_right -> somnolence [style=invis];
+ Age -> secre_right  [style=invis];
+ Age -> secret_node2 [style=invis,minlen='2.9'];
+ Age -> observance;
+ Age ->  somnolence;
+ 
+ Sex ->  Age [style=invis];
+ Sex -> observance;
+ Sex ->  somnolence;
+ Sex -> secre_right_sex [style=invis];
+ secre_left_sex -> Sex [style=invis];
+ secre_left_sex -> secre_left [style=invis];
+ 
+ 
+ BMI ->  Sex [style=invis];
+ BMI -> observance;
+ BMI ->  somnolence;
+ BMI -> secre_right_BMI [style=invis];
+ secre_left_BMI -> BMI [style=invis];
+ secre_left_BMI -> secre_left_sex [style=invis];
+}"}
+grViz(confunding_diagram) %>% 
+  export_svg %>%
+  charToRaw %>%
+  rsvg_pdf("graph/cofunding_factor.pdf")
+include_graphics("graph/cofunding_factor.pdf")
+
+df <- df %>% 
+  replace_na(list(Vis_init_ATC_id_typeDiabete = 0,
+                  ATC_id_typeDiabete = 0)) 
+
+## Création des variables temps indépendant
+var_mesure_unique <- df %>%
+  select(contains("Mesure_unique_")) %>% 
+  colnames() # %>% gsub("Mesure_unique_","",.)  
+var_visit_init <- df %>%
+  select(contains("Vis_init_")) %>% 
+  colnames() # %>% gsub("Mesure_unique_","",.)  
+
+var_non_visit_init <-  df %>%
+  select(!contains("Vis_init_")) %>% 
+  colnames()
+# print.vecteur(var_mesure_unique)
+
+## suppression de la premieres visites 
+df_example_mesure_uni_init <- df %>% 
+  select(id_patient,
+         num_visite,
+         Mesure_unique_CHA_id_sexe,
+         contains("CHA_age"),
+         contains("CHA_poids")) %>%
+  filter(id_patient < 10)  %>% 
+  mutate_at(vars(contains("_age")),~formatC(., format = "f", digits = 1)) 
+
+df_inclusion <- df %>% 
+  filter(num_visite != 1) 
+
+
+# Critère d'inclusion
+visite_seuil <- 2
+df_visite <- df_inclusion %>%
+  filter(num_visite <= visite_seuil)
+
+df_SAS <-  df_visite  %>% 
+  filter(!is.na(Vis_init_INS_IAH),
+         Vis_init_INS_IAH >= 5) #INS_IAH
+
+perte_SAS_pat <- df_visite %>% 
+  filter(is.na(Vis_init_INS_IAH) | Vis_init_INS_IAH < 5) %>%  #INS_IAH
+  select(id_patient) %>%  n_distinct()
+
+
+
+nb_SAS_pat <- n_distinct(df_SAS$id_patient)
+
+
+
+df_obs <- df_SAS %>% 
+  group_by(id_patient)  %>% 
+  mutate(INS_observance = sum(is.na(PPC_observanceMoy_finale))) %>%
+  filter(INS_observance == 0 ) %>% 
+  select(-INS_observance) # retrait de la variables instrumentale
+
+
+perte_obs_pat <-  df_SAS %>% 
+  group_by(id_patient) %>% 
+  filter(num_visite != 1 ) %>% 
+  mutate(INS_observance = sum(is.na(PPC_observanceMoy_finale))) %>%  
+  filter(INS_observance != 0 ) %>% 
+  select(id_patient) %>% 
+  n_distinct()
+
+nb_obs_pat <-  n_distinct(df_obs$id_patient)
+
+
+# Choix de l'outcome  
+df_choix_outcome <-  df_obs %>% 
+  group_by(id_patient) %>%
+  mutate(naEPW = sum(is.na(SYM_echelleEpworth)) == 0 ,
+         nasysto =  sum(is.na(CHA_PASystolique)) == 0,
+         nadiasto =  sum(is.na(CHA_PADiastolique)) == 0 ,
+         PA_ok =  sum(!is.na(CHA_PASystolique),!is.na(CHA_PADiastolique))==2 ,
+         PAna =  sum(is.na(CHA_PASystolique),is.na(CHA_PADiastolique))!=2) %>% 
+  distinct(id_patient , .keep_all = TRUE)
+
+
+df_EPW <-  df_obs %>%
+   group_by(id_patient) %>%
+   mutate(naEPW = sum(is.na(SYM_echelleEpworth)|
+                        is.na(Vis_init_SYM_echelleEpworth))) %>% # utile car permet de scale sur plus de rendez-vous
+   filter(naEPW == 0) %>% 
+   select(-naEPW) %>% 
+   mutate(SYM_echelleEpworth = Vis_init_SYM_echelleEpworth - SYM_echelleEpworth) %>% 
+  select(-Vis_init_SYM_echelleEpworth)%>% 
+   ungroup() 
+
+
+#sum(is.na(df_EPW$SYM_echelleEpworth))
+
+perte_EPW_pat <- df_obs %>%
+  group_by(id_patient) %>%
+   mutate(naEPW = sum(is.na(SYM_echelleEpworth)|
+                        is.na(Vis_init_SYM_echelleEpworth))) %>% # utile car permet de scale sur plus de rendez-vous
+  filter(naEPW != 0) %>% select(id_patient) %>%
+  n_distinct()
+
+nb_EPW_pat <- n_distinct(df_EPW$id_patient)
+
+name_expo <- paste0(quote(INS_obs_categ))
+name_outcome <- paste0(quote(SYM_echelleEpworth))
+
+Observance_numeric_sav <- df_EPW
+res.hc <- hclust(dist(df_EPW  %>% 
+                        select(PPC_observanceMoy_finale)),  method = "ward.D2")
+INS_OBS_cluster <- cutree(res.hc,k = 5)
+
+df_obs_categ_2 <- df_EPW %>% 
+  mutate(INS_obs_categ = INS_OBS_cluster)  
+
+
+cut_cluster <- df_obs_categ_2 %>% 
+  group_by(INS_obs_categ) %>% 
+  summarise(min = min(PPC_observanceMoy_finale),
+            max = max(PPC_observanceMoy_finale),.groups = "drop" ) %>% 
+  arrange(max)
+
+df_obs_categ_2 <- df_obs_categ_2 %>%  select(-PPC_observanceMoy_finale)
+
+obs_cut_temp3 <- c(0,cut_cluster$max)
+for (i in seq_along(cut_cluster$max)) {
+  cat("-", table(df_obs_categ_2[,name_expo])[i],
+      " patients avec une observance entre ",roud_hour(cut_cluster$min[i]),
+      " et ", roud_hour(cut_cluster$max[i]) ,'\n')
+}
+
+eval_decoupage_cluster <- function_box_plot_expo_func(df_obs_categ_2,
+                                                      name_expo,name_outcome)
+eval_decoupage_cluster$plot_test
+
+vec_cut <- obs_cut_temp3
+df_obs_categ <- df_obs_categ_2
+
+date_ddn <- df_obs_categ %>% 
+  ungroup() %>% 
+  select(which(sapply(.,is.Date)),contains("date"),contains("ddn")#,contains("INS_tmp_entre_rdv")
+         ) %>% 
+  colnames()
+
+id_idv <- df_obs_categ %>% 
+  ungroup() %>% 
+  select(contains("id_"),contains("idv")) %>% 
+  select(-id_patient,
+         -Mesure_unique_ATC_id_typeDiabete,
+         -PPC_id_typeMasque,
+         -Mesure_unique_CHA_id_sexe) %>% 
+  colnames()
+
+if(visite_seuil == 2) df_obs_categ <-  df_obs_categ %>% select(-num_visite)
+
+df_ss_var_select_man <- df_obs_categ  %>%   
+  ungroup() %>% 
+  select(-one_of(date_ddn),
+         -one_of(id_idv)) %>% 
+  mutate_all(as.numeric)
+
+
+
+charecter_col <- df_ss_var_select_man  %>% 
+  select_if((colSums(is.na(.)) == nrow(.)) ) %>%  
+  colnames()
+  
+# conserver une dataframe a part de la selection de variables 
+df_sav_temp <- df_ss_var_select_man %>% 
+  mutate_all(as.numeric) %>% 
+  select_if(!(colSums(is.na(.)) == nrow(.))) # remove char col dont je ne sais pas quoi faire de toutes manières
+ 
+
+
+
+
+Recherche_duplicata_column <- distinc_col(df_sav_temp )
+
+
+
+df_sav_temp <- Recherche_duplicata_column$df
+
+var_non_visit_init_sav_tem <-  df_sav_temp %>%
+  select(!contains("Vis_init_")) %>% 
+  colnames()
+
+col_ident <- Recherche_duplicata_column$colonne_suprime
+
+# Gestion des cas ou variables visit_init et var temps dep corrélé
+temp_tt_colonne_dupli <- lapply(seq_along(col_ident), function(x) {
+    court <- names(which.min(sapply(col_ident[[x]], nchar)))
+    restant <- str_remove(col_ident[x] %>% unlist(), court) 
+      if (all(restant %in% c("Vis_init_", ""))) {
+      court
+    }
+}) 
+
+
+duplicate_fact_init <- temp_tt_colonne_dupli %>% compact %>% unlist
+
+
+  
+duplicate_verif_manu <-   col_ident[lapply(temp_tt_colonne_dupli,
+                                           function(x) is.null(x) ) %>% unlist()] 
+
+if (!is_empty(duplicate_verif_manu)) stop("vérif manuel a faire")
+
+
+# valeurs manquante 
+nb_val_manq_par_var <- compte_na_par_var_par_grp(df_sav_temp,
+                                                 "id_patient",colnames(df_sav_temp)) 
+seuil_na <- 0.6
+frac_val_manq_par_var <- nb_val_manq_par_var %>% 
+  mutate_at(vars(-presence_na),list(~(./sum(.)))) %>% 
+  filter(presence_na == (visite_seuil - 1)) %>% select(-presence_na)
+trop_manquant <- frac_val_manq_par_var %>%
+  select_if(. > 1-seuil_na ) %>% 
+  colnames()
+
+df_rm_na <- df_sav_temp %>% select(-all_of(trop_manquant),-id_patient)
+
+
+Var_manquant_colnames <- df_rm_na %>% colnames()
+
+
+
+# Gestions des colinéarité
+seuil_cor <- 0.7
+corelation_var_df <- df_rm_na  %>% select(all_of(Var_manquant_colnames))
+
+
+mat_cor <- cor(corelation_var_df  ,use =  "pairwise.complete.obs")
+
+var_cor <- which(abs(mat_cor) > seuil_cor & 
+                   (row(mat_cor) != col(mat_cor)) ,arr.ind = TRUE) %>% 
+  as_tibble() %>% 
+  pivot_wider(names_from = row, values_from = col,values_fn = list(col = list)) %>%
+  t.df()
+
+
+var_correlle <- lapply(unique(
+  lapply(
+    lapply(split(var_cor, row.names(var_cor)), unlist),
+    function(x) sort(
+      as.numeric(
+        unique(x))
+      ))), 
+  function(x) colnames(mat_cor)[x])
+
+
+# Gestion des cas ou variables visit_init et var temps dep corrélé
+Var_corr_init_temp_dep <- lapply(var_correlle, function(x) {
+if (length(x) == 2){
+    court <- names(which.min(sapply(x, nchar)))
+    long <- names(which.max(sapply(x, nchar)))
+    different_part <- str_remove(long, court)
+    if (different_part == "Vis_init_") {
+      result <- court
+    }
+}}
+) %>% compact %>% unlist
+
+Var_corr_no_init_temp_dep <- lapply(var_correlle, function(x) {
+ if (length(x) == 2){
+    court <- names(which.min(sapply(x, nchar)))
+    long <- names(which.max(sapply(x, nchar)))
+    different_part <- str_remove(long, court)
+    if (different_part != "Vis_init_") {
+      result <- TRUE#c(court,long)
+    } else {result <- FALSE}
+ } else if (length(x) != 2) {
+   result <- TRUE
+ }
+  }
+) %>% 
+ # compact %>%
+  unlist
+
+
+# list of correlated variables
+Var_cor_select_manu <- var_correlle[Var_corr_no_init_temp_dep]  
+
+# variable choose from list above 
+Select_manu_cor <- c("Vis_init_CHA_BMI")
+
+
+
+var_cor_retire <- c(Var_corr_init_temp_dep, 
+                    select_manuel_verif(Var_cor_select_manu,Select_manu_cor))
+
+Var_cor_colnames <- Var_manquant_colnames[Var_manquant_colnames %notin% var_cor_retire]
+
+
+
+df_ss_cor <- df_sav_temp %>% 
+  select(id_patient,all_of(name_outcome),all_of(name_expo),all_of(Var_cor_colnames))  
+
+
+not_numeric <- df_ss_cor %>% summarise_all(list(~n_distinct(.))) %>% 
+  t.df() %>% 
+  mutate(numeric = col_1 < 10) %>% 
+  filter(numeric) %>% 
+  select(key) %>% 
+  unlist(use.names = FALSE)
+
+nb_valeur_facteur_deuxieme_max <- function(col){
+  res <- sort(table(col),decreasing = TRUE)[2]
+  return(res)
+}
+
+poucent_pat_necessaire <- 20
+nb_pat_cut <- df_ss_cor %>% 
+  summarise_all(list(~sum(!is.na(.)) * poucent_pat_necessaire/100))  %>%
+  t.df() 
+
+moda_trop_peu_pat_moda_2 <- df_ss_cor %>% 
+  select(all_of(not_numeric)) %>%  
+  summarise_all(list(~nb_valeur_facteur_deuxieme_max(.))) %>%
+  t.df() %>% 
+  inner_join(nb_pat_cut,by = "key" ) %>% 
+  setNames( c("var", "second_max","cut_nb_pat")) %>% 
+  filter(second_max < cut_nb_pat) %>% 
+  select(var) %>% 
+  unlist(use.names = FALSE)
+
+near_zero_var <- df_ss_cor  %>% 
+  select(all_of(nearZeroVar(.,names = TRUE))) %>% colnames()
+moda_trop_peu_pat <- c(moda_trop_peu_pat_moda_2,near_zero_var)
+
+Var_nb_pat_colnames <- Var_cor_colnames[Var_cor_colnames %notin% moda_trop_peu_pat]
+
+
+
+## Selection des variables liée a l'outcome 
+set.seed(123)
+# patients use for variables select
+df_model_select_var <- df_sav_temp %>% group_by(INS_obs_categ) %>%
+  slice_sample(prop= 0.2) %>% ungroup()
+# other patients
+df_analyse_final <- df_sav_temp %>% anti_join(df_model_select_var)
+
+# value for flow chart
+perte_select_var <- df_model_select_var %>% 
+  select(id_patient) %>% n_distinct()
+
+model_lin <- df_model_select_var %>% select(-id_patient) %>%
+  select(all_of(Var_nb_pat_colnames))
+model_expo <- model_lin %>%  
+  select(-all_of(name_outcome)) %>% 
+  gather(measure, value, -all_of(name_expo)) %>%
+  mutate(value = as.numeric(value)) %>%
+  group_by(measure) %>% 
+  nest() %>%
+  ungroup() %>% 
+  mutate(fit = map(data, ~ glm(paste0(name_expo,"~ value"),
+                               data = .x), family = binomial(link = 'logit'),
+                   na.action = na.omit),
+         tidied = map(fit, tidy)) %>%
+  unnest(tidied) %>% 
+  filter(term != "(Intercept)") %>% # on elnlève l'intercept
+  select(-data,-fit,-term)  # retire les donnée
+
+
+model_outcome <- model_lin %>% 
+  select(-all_of(name_expo)) %>% 
+  gather(measure, value, -all_of(name_outcome)) %>%
+   mutate(value = as.numeric(value)) %>%
+  group_by(measure) %>% 
+  nest() %>%
+  ungroup() %>% 
+  mutate(fit = map(data, ~ glm(paste0(name_outcome,"~ value"), data = .x),
+                   family = gaussian(link = "identity"),na.action = na.omit),
+         tidied = map(fit, tidy)) %>%
+  unnest(tidied) %>% 
+  filter(term != "(Intercept)") %>% # on elnlève l'intercept
+  select(-data,-fit,-term)  # retire les donnée
+
+
+
+p_val_var <- model_expo %>% 
+inner_join(model_outcome, by= c("measure" = "measure")) %>% 
+  select(measure,contains("p.value"))
+
+
+P_val_out_come_colnames <- p_val_var %>% 
+  filter(p.value.y < 0.2) %>% 
+  select(measure) %>% 
+  unlist(use.names = FALSE) %>% 
+  sort
+
+P_val_out_come_et_expo_colnames <- p_val_var %>% 
+  filter(p.value.y < 0.2, p.value.x < 0.2)  %>% 
+  select(measure) %>%
+  unlist(use.names = FALSE) %>% 
+  sort
+
+Var_model_outcome <- Var_nb_pat_colnames[Var_nb_pat_colnames %in% P_val_out_come_colnames]
+var_mod_pds <- Var_nb_pat_colnames[Var_nb_pat_colnames %in% P_val_out_come_et_expo_colnames]
+
+## imputation
+df__pre_imput <- df_analyse_final  %>% 
+  select(id_patient,
+         all_of(name_outcome),
+         all_of(name_expo),
+         all_of(Var_model_outcome))
+  
+missing_patern <- mice::md.pattern(df__pre_imput)
+col_sans_NA <- df__pre_imput %>% select_if(colSums(is.na(.)) == 0) %>% colnames()
+
+table_resume_pre_impute <- table_resume_latex(df__pre_imput %>%
+  select(-id_patient) ,name_expo, "grp_obs")
+
+
+
+
+df__post_imput <- impute_si_changement(df__pre_imput,"data/genere/data_impute.rds")
+
+
+table_resume_post_impute <- table_resume_latex(df__post_imput %>% 
+  select(-id_patient) ,name_expo,"grp_obs")
+
+
+### Vérification de  l'imputation   
+
+imputation_verif <- test_imputation(df__pre_imput,df__post_imput,name_expo)
+
+imputation_verif$T_diff %>% 
+  arrondie_df %>% 
+  kable( longtable =  TRUE, 
+         booktabs = TRUE,
+             caption = "Table des différence entre les variables Pré et Post imputation") %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"), 
+                font_size = 7) 
+
+df_final <- df__post_imput
+# perte_na_covar_pat <- n_distinct(df_sav_temp$id_patient) - n_distinct(df_final$id_patient)
+
+attributes(Observance_numeric_sav$id_patient) <- NULL # gestion d'un warning chiant
+observanve_num <- df_final  %>% 
+  inner_join(Observance_numeric_sav %>% filter(num_visite == visite_seuil) ,
+             by = "id_patient") %>%  
+  select(PPC_observanceMoy_finale)
+
+rm(Observance_numeric_sav)
+
+patient_par_grp_expo  <- df_final %>% select(all_of(name_expo)) %>% table
+
+perte_visit_pat <- nb_pat - (visite %>% unlist() %>% rev() %>% cumsum %>%
+                               .[length(.) - (visite_seuil-1)])
+
+patient_perdu <- c(perte_visit_pat,
+                   perte_SAS_pat,
+                   perte_obs_pat,
+                   perte_EPW_pat,
+                   perte_select_var)
+critere <- c(paste0("Patient with less than " , visite_seuil ," visits"),
+             "Patient without Sleep apnea",
+             "Patient without adherence",
+             "Patient without Epworth",
+             "Patients use in variables selection")
+
+
+
+
+grViz(flow_chart(nb_pat,critere,patient_perdu,patient_par_grp_expo)) %>% 
+  export_svg %>%
+  charToRaw %>% 
+  rsvg_pdf("graph/graph_flow_chart_2_visites.pdf")
+
+# test 
+## pas de NA 
+if (df_final %>% summarise_all(~sum(is.na(.))) %>% rowSums(.) != 0 ) {
+  stop('Row avec Na')}
+# test pas de tb erectile chez les femmes
+
+if("Vis_init_SYM_troubleErection" %in% colnames(df_final)){
+if ((df_final  %>% filter(Mesure_unique_CHA_id_sexe == 0) %>% 
+     summarise(sum(Vis_init_SYM_troubleErection))) != 0  ) {
+  stop('trouble erectile chez les femmes')}
+}
+saveRDS(df_final, file = paste0("data/genere/data_prett_nb_vis_",visite_seuil,".rds"))
+
+
+#sauvegarde des variables du model de poids
+df_var_modele <- data.frame(Var_model_outcome = Var_model_outcome) %>% 
+  mutate(var_mod_pds = Var_model_outcome %in% var_mod_pds)
+
+
+saveRDS(df_var_modele, file = paste0("data/genere/model_",visite_seuil,".rds"))
+
+saveRDS(vec_cut, file = paste0("data/genere/obs_multinomial_en_heure.rds"))
+
+df_modele_pds <- read_rds("data/genere/data_prett_nb_vis_2.rds") 
+
+# pour le moment facteur gérer a la main a réfléchir
+donnee <- df_modele_pds %>% 
+  mutate_at( typages_function(df_modele_pds,10)$colonne_type$facteur,
+             factor) %>% 
+  select(-id_patient) %>% 
+  #mutate(INS_obs_categ = INS_obs_categ >2) %>% 
+  as.data.frame()
+
+binaire <- calcule_pds_stage(donne = donnee,expo = INS_obs_categ,
+                             covar = var_mod_pds ,out_come = SYM_echelleEpworth)
+
+
+# Modèle multinomial de poids   
+# df_one_hot_encode <- donnee 
+alpha_tableau_resume <- 0.05
+  tableau_resume_ex <- head(donnee,500)
+  save(tableau_resume_ex,file = "tableau_resume_exemple.RData")
+  
+var_instrumental_name  <- c("INS_obs_categ" = "Adherence groups", 
+                            "Vis_init_INS_IAH" = "Apnea hypopnea index", 
+                            "INS_PPC_effet_ind" = "number of ADR types under CPAP",
+                            "INS_tmp_entre_rdv" = "Duration since diagnosis (year)")
+
+table_rename <- one_hot_fb(df__pre_imput,list_factor =  c(  "PPC_id_typeMasque"  )) %>% 
+  select(-id_patient) %>%  rename_variables(var_instrum_name = var_instrumental_name) 
+
+
+One_hot_encode_donnee <-table_rename %>% .$table_rename
+table_resume_latex_ss_escape <- table_resume_latex(df_one_hot_encode_fonc =  One_hot_encode_donnee,
+                                             name_expo_fonc = "Adherence groups",
+                                             nom_grp  = "Adherence grp",
+                                             p_val = TRUE,
+                                             alpha = alpha_tableau_resume)
+
+table_resume_html_prez <- table_resume_html(df_one_hot_encode_fonc =  One_hot_encode_donnee,
+                                             name_expo_fonc = "Adherence groups",
+                                             nom_grp  = "Adherence_grp",
+                                             p_val = TRUE,
+                                             alpha = alpha_tableau_resume)
+
+
+# récupér ation du vrai nom des var du modèle depoids
+label_var_mod_poids <- table_rename$complete_table %>% 
+  filter(str_detect(var_name, paste(var_mod_pds,collapse = '|'))) %>% 
+  select(Label) %>% unlist(use.names = FALSE)
+
+
+model_poids_df <- tidy(binaire$res_intermediaire$regression_modele_pds$regression_temps_ind)
+model_poids_df %>% 
+  select(-statistic) %>% 
+  arrondie_df %>% 
+  mutate(p.value = ifelse(p.value == "0.0e+00", 
+                          "< 0.001",p.value)) %>% 
+  arrange(term) %>% 
+  kable( longtable =  TRUE,
+         booktabs = TRUE,
+         caption = "Table des coeficient du modèle de poids") %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"),
+                font_size = 7)# %>%  landscape()
+
+
+donnee <- donnee %>% mutate_at(name_expo,list(~relevel(., ref = "4"#max(as.numeric(.)) ancienne version conservé comme référence si besoin
+                                                   )))
+
+
+poids_mod_final <- binaire$res_intermediaire$poids$poids_tronc$poids_trunc_stab$`( 0.01;0.99 )`
+donne_mod_fin <- donnee
+model_final <- glm( SYM_echelleEpworth ~ .,
+                    data = donnee,
+                    family = gaussian(), 
+                    weight = poids_mod_final)
+iR_mod_final <- confint(model_final)
+
+summary(model_final)$coefficients %>% 
+  as.data.frame() %>% 
+  rownames_to_column %>% 
+  inner_join(iR_mod_final %>% 
+  as.data.frame()  %>% rownames_to_column() , by = "rowname") %>% 
+  column_to_rownames()  %>% 
+  arrondie_df() %>% 
+  rownames_to_column %>% 
+  rename(`Pr($>|t|$)` = `Pr(>|t|)`) %>% # gestion problème avec latex
+  mutate(`95\\% Confidence interval` = paste0("( ",`2.5 %`," ; ",`97.5 %`,  " )")) %>% 
+  select(rowname,Estimate,`95\\% Confidence interval` ,`Pr($>|t|$)`) %>% 
+  column_to_rownames()  %>% 
+  kable(align = "c",
+       label = "Table_model_final",
+       booktabs = TRUE,
+       escape = FALSE,
+       caption = "Table of final model adherence group coefficient") %>%
+  kable_styling(latex_options =  c( "striped","HOLD_position", "scale_down","repeat_header"), 
+                font_size = 7) 
+
+
+summary(model_final)$coefficients %>% as.data.frame() %>%
+  rownames_to_column %>% filter(str_detect(rowname,"INS_obs_categ")) %>%
+  mutate(rowname = paste0("Adherence group ", 
+                          str_remove_all(rowname,"INS_obs_categ"))) %>%
+  column_to_rownames() %>% 
+  kable(longtable =  TRUE,
+        booktabs = TRUE,
+       caption = "Table des coeficient du modèle final pondéré") %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"), 
+                font_size = 7)
+  
+```
+
+
+## Sources
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, eval = FALSE}
+##########################################################
+##                    function                          ##
+##########################################################
+deriv <- function(x, y) diff(y) / diff(x)
+
+get.elbow.points.indices <- function(x, y, threshold) {
+  d1 <- deriv(x, y) # first derivative
+  indices <- which(abs(d1) > threshold)
+  return(indices)
+}
+`%notin%` <- Negate(`%in%`)
+
+
+
+##########################################################################################
+# fonction maison pour rechercher le type des données 
+
+## objectifs suivant différence entre int et float
+typages_function <- function(df,nb_moda_max_fact = NULL ){
+  if (is.null(nb_moda_max_fact)) {
+    df %>% 
+      summarise_all(list(~n_distinct(na.omit(.)))) %>%
+      t.df() %>% filter(col_1 > 2) %>% 
+      arrange(col_1) %>% 
+      print
+    stop('Si la liste des facteurs n\'est pas fournis le nombre de modalité à partir
+           duquel un facteur doit etre considéré comme un numéric avec `nb_moda_max_fact = `,
+           \n pour vous aidez dans le choix du nombre de modalité la liste des variables
+           avec plus de deux modalité différente est présenté au  dessus')}
+  else {
+    temp_moda_par_var <- df %>% summarise_all(list(~n_distinct(na.omit(.)))) %>% 
+      t.df() %>% 
+      mutate(binaire = col_1 == 2, numeric = col_1 >= nb_moda_max_fact,
+             multinomial = (col_1 < nb_moda_max_fact & col_1 > 2)) %>% 
+      arrange(col_1) 
+    list_factor <- temp_moda_par_var %>% 
+      filter(multinomial) %>%
+      select(key) %>% 
+      unlist(use.names = FALSE)
+    liste_booleen <- temp_moda_par_var %>% 
+      filter(binaire) %>%
+      select(key) %>% 
+      unlist(use.names = FALSE)
+    liste_numeric <- temp_moda_par_var %>% 
+      filter(numeric) %>%
+      select(key) %>% 
+      unlist(use.names = FALSE)
+    res <- list(colonne_type = list(facteur = list_factor,
+                                    booleen = liste_booleen,
+                                    numerique = liste_numeric),
+                data_frame_tot = temp_moda_par_var)
+  }
+  return(res)
+}
+##########################################################################################
+# fonction maison pour le one hot encoding
+
+one_hot_fb <- function(df, nb_moda_max_fact = NULL, list_factor = NULL){
+  if (is.null(list_factor)) {
+    list_factor <- typages_function(df, nb_moda_max_fact)$colonne_type$facteur
+    cat("Le nombre maximum de modalité par facteur est de ",
+        nb_moda_max_fact,
+        "\n pour supprimer ce warning utilisez `list_factor = ", "c( ",
+        paste0("\"",list_factor,"\"",collapse = " , "),
+        " )` \n au lieu de `nb_moda_max_fact = ", nb_moda_max_fact,"`")
+  }
+  
+  
+  
+  df <- df %>% mutate_at( list_factor,as.factor)
+  dmy <- dummyVars(paste0(" ~ ", paste0(list_factor,collapse = " + ")), data = df)
+  trsf <- data.frame(predict(dmy, newdata = df))
+  res <- df %>% select(-all_of(list_factor)) %>% cbind(trsf) # ajout all_of retirer si bug 
+  return(res)
+  # reste a ajouter une partie qui renomme les varibles mieux 
+}
+
+
+##########################################################################################
+# function récupérant les variables pour table descriptive des variables
+
+# df_one_hot_encode_fonc généré avec one_hot_fb
+
+recup_var_table_res <- function(df_one_hot_encode_fonc,name_expo_fonc){
+  res <- df_one_hot_encode_fonc %>% 
+    select(-all_of(name_expo_fonc)) %>% 
+    mutate_if(is.factor, ~as.numeric(as.character(.))) %>% # points litigieux j'utilise cette méthode pour convertir mes facteur booleen en numeric a surveilllé a l'avenir
+    summarise_all(list(fonc_med = ~median(.,na.rm = TRUE),
+                       fonc_quart1 = ~quantile(.,0.25,na.rm = TRUE),
+                       fonc_quart2 = ~quantile(.,0.75,na.rm = TRUE),
+                       fonc_n = ~sum(.,na.rm = TRUE), 
+                       fonc_pourcent = ~mean(.,na.rm = TRUE)*100,
+                       fonc_nb_NA = ~sum(is.na(.))
+    )
+    ) %>% 
+    pivot_longer(cols =  everything(),
+                 names_to = c(".value", "level"),
+                 names_pattern = "(.*)_fonc_(.*)") %>% 
+    t.df(.,"level") 
+  return(res)}
+
+##########################################################################################
+# table descriptive des variables
+
+# df_one_hot_encode_fonc généré avec one_hot_fb
+# Version prévue pour échapper les caracter latex
+table_resume_latex <- function(df_one_hot_encode_fonc,name_expo_fonc,
+                               nom_grp = "clusters", 
+                               p_val = FALSE, 
+                               arrondie = TRUE, alpha = 0.05) {
+  
+  # Typage des variables a réusmer en booleen ou numeric
+  # Car normalement df pré_one hot encode
+  table_bool_var <-   df_one_hot_encode_fonc %>% 
+    select(-all_of(name_expo_fonc)) %>% 
+    summarise_all(list(~n_distinct(., na.rm = TRUE))) %>% 
+    t.df %>% 
+    rename(booleen = col_1) %>% 
+    {temp_verif_bool <<- .} %>% 
+    mutate(booleen = booleen <= 2)
+  
+  
+  if (any(temp_verif_bool$booleen < 2)) {
+    print(temp_verif_bool$key[temp_verif_bool$booleen < 2])
+    stop("moins de deux valeurs distinct pour une variables")}
+  
+  
+  
+  name_all_grp <- paste0("all ",nom_grp)
+  
+  
+  all_cluster_descript_var <- df_one_hot_encode_fonc %>% 
+    recup_var_table_res(name_expo_fonc) %>% 
+    #{ifelse(arrondie ,arrondie_df(.), . )} %>% print %>% 
+    
+    mutate(nb_NA = ifelse(nb_NA == 0,"",paste0("NA:", nb_NA )))  
+  
+  
+  nb_grp <- df_one_hot_encode_fonc %>% select(all_of(name_expo_fonc)) %>% 
+    unique() %>% 
+    unlist(use.names = FALSE) %>% 
+    sort
+  
+  group_cluster_descript_var <- lapply(nb_grp, function(x) {
+    col_name <- paste0(nom_grp,"_",x)
+    res <- df_one_hot_encode_fonc  %>%
+      filter(!!sym(name_expo_fonc) == x) %>% 
+      recup_var_table_res(name_expo_fonc)  %>% 
+      mutate(nb_NA = ifelse(nb_NA == 0,"",paste0("NA:", nb_NA ))) %>% 
+      inner_join(table_bool_var,by = "key") %>% 
+      mutate({{col_name}} := ifelse( booleen
+                                      , paste0(n ,"(",round(pourcent,1), "%)", nb_NA),
+                                      paste0(round(med,0) ,"(",
+                                             round(quart1,0),";",
+                                             round(quart2,0), ")", nb_NA))) %>%
+      select(all_of(col_name))
+    return(res)
+  }
+  )
+  
+  table_res <- all_cluster_descript_var %>%  
+    inner_join(table_bool_var,by = "key") %>% 
+    mutate( {{name_all_grp}} := ifelse(booleen
+                                       , paste0(n ,"(",round(pourcent,1), "%)",  nb_NA),
+                                       paste0(round(med,0) ,"(",
+                                              round(quart1,0),";", 
+                                              round(quart2,0), ")", nb_NA) ) )  %>% 
+    select(key,all_of(name_all_grp)) %>% 
+    cbind(bind_cols(group_cluster_descript_var)) %>% 
+    data.frame(., row.names = 1) 
+   # rename_at(vars(contains(".grp")),funs(str_replace(.,"\\."," ")))
+    
+  
+  table_res <- table_res %>% rename_all(list(~str_replace_all(.,"\\."," ")))
+  # si choix de calculer les p-val 
+  if (p_val) {
+    # prevoir un groupe de plus pour le toutes les catégorie
+    nb_group_pval <-  as.character(c(as.numeric(nb_grp),max(as.numeric(nb_grp)) + 1 ))
+    # création de toutes les combinaisons de groupe a tester
+    combin_grp <- nb_group_pval %>%  combn(2)
+    # Création du groupe supplémentaire tout les groupes en dupliquant la dataframe avec un  groupes de plus
+    df_pval <- df_one_hot_encode_fonc %>% 
+      mutate(!!sym(name_expo_fonc) := max(as.numeric(nb_group_pval))) %>% 
+      rbind(df_one_hot_encode_fonc)
+    
+    non_boolean_var <- table_bool_var %>% filter(!booleen) %>% 
+      select(key) %>% unlist(use.names = FALSE)
+    boolean_var <- table_bool_var %>% filter(booleen) %>%
+      select(key) %>% unlist(use.names = FALSE)
+    # création  de la table avec p-value pour chaque combin et rename chaque colonnes a_b 
+    combin_ttest_pval <- apply(combin_grp, 2, function(x)
+      df_pval %>%
+        select(sym(name_expo_fonc),all_of(non_boolean_var)) %>% 
+        #summarise_at(vars(-(sym(name_expo_fonc))),list(~t.test(.[!!sym(name_expo_fonc) == x[1]], .[!!sym(name_expo_fonc)  ==  x[2]])$p.value)) %>% 
+        summarise_at(vars(-(sym(name_expo_fonc))),
+                     list(~t.test(.[!!sym(name_expo_fonc) == x[1]],
+                                  .[!!sym(name_expo_fonc)  ==  x[2]])$p.value)) %>% 
+        t.df %>% 
+        rename_at("col_1",list( ~paste0(x[1],"_",x[2])))
+    )
+    combin_chisq_pval <- apply(combin_grp, 2, function(x)
+      df_pval %>%
+        select(sym(name_expo_fonc),all_of(boolean_var)) %>% 
+        dplyr::summarise_at(vars(-sym(name_expo_fonc)),
+                            
+                            list(~ifelse(sum(.[!!sym(name_expo_fonc) == x[1]],
+                                             na.rm = TRUE) < 8|
+                                           sum(.[!!sym(name_expo_fonc)  ==  x[2]],
+                                               na.rm = TRUE) < 8,
+                                         NA,
+                                         prop.test(
+                                           x = c(sum(.[!!sym(name_expo_fonc) == x[1]],
+                                                     na.rm = TRUE),
+                                                 sum(.[!!sym(name_expo_fonc)  ==  x[2]],
+                                                     na.rm = TRUE)), # compute number of success
+                                           n = c(sum(!is.na(.[!!sym(name_expo_fonc) == x[1]])),
+                                                 sum(!is.na(.[!!sym(name_expo_fonc)  ==  x[2]])))
+                                         )$p.value))
+        ) %>% 
+        t.df %>% 
+        rename_at("col_1",list( ~paste0(x[1],"_",x[2])))
+    )
+    
+    
+    combin_total_pval <- mapply(rbind,combin_chisq_pval,combin_ttest_pval,SIMPLIFY=FALSE)
+    
+    # transformation de la p-value en booléen en avec comme seuil le alpha définis en appliquant une correction de bonneferonni en considérant le nombre total de test nb ligne X nb collones
+    result_pval <- bind_cols(combin_total_pval) %>%
+      rename(key = key...1) %>% 
+      select(key,contains("_")) %>%
+      mutate_at(vars(-key),list(~(. < (alpha / ncol(combin_grp))
+      ))
+      ) %>%  # hypothèse et correction de bonneferonnie 
+      mutate_at(vars(-key), function(x) {
+        x_var <- rlang::enquo(x)
+        ifelse(x , rlang::quo_name(x_var), "non") # remplacement des p-val non signif par une chaine spécifique
+      }) %>% 
+      mutate_at(vars(-key), function(x) {
+        x_var <- rlang::enquo(x)
+        ifelse(is.na(x) , paste0(rlang::quo_name(x_var),"*"),x) # remplacement des p-val non signif par une chaine spécifique
+      })
+    
+    # REcherche avec une simili boucle des p-val signif pour chaque colonnnes 
+    # on en lève la chaine spécifique de non corrélation 
+    df_pval_final <- lapply(nb_group_pval, function(x) {
+      result_pval %>% select(key,contains(x)) %>% 
+        mutate_at(vars(contains(x)),list(~str_remove_all(.,
+                                                         paste(c("_",x), 
+                                                               collapse = "|")))) %>% 
+        unite(!!sym(paste0(nom_grp,"_",x)) ,contains(x),sep = ",")
+    }
+    ) %>% bind_cols() %>% 
+      rename(key = key...1) %>% 
+      select(key,contains(nom_grp)) %>% 
+      rename(!!sym(name_all_grp) := paste0(nom_grp,"_",
+                                           max(as.numeric(nb_group_pval)))) %>%   
+      mutate_all(list(~str_remove_all(.,"non,|,non"))) %>%  
+      mutate_all(list(~str_remove_all(.,"non")))
+    
+    if(df_pval_final %>%  transmute_at(vars(-key),
+                                       list(~str_detect(.,"non"))) %>% 
+       as.matrix() %>% any) {
+      stop("il reste des p-val non traité")}
+    
+    # Gestion des tables latex pour que les différences statisquement significative soit en subscript
+    # en échappant les underscore
+    table_res_pval <-  table_res %>% 
+      rownames_to_column() %>%
+      pivot_longer(-rowname,values_to = "valeur") %>%
+      inner_join((df_pval_final %>% pivot_longer(-key,values_to = "pvalue") ),
+                 by = c("rowname" = "key", "name" = "name")) %>% 
+      mutate(combin = paste0(valeur,"\\textsubscript{",pvalue, "}")) %>% 
+      select(rowname,name,combin) %>% 
+      pivot_wider(names_from = name, values_from = combin) %>% 
+      column_to_rownames()   
+    
+    table_res_pval <- table_res_pval %>% 
+      rownames_to_column() %>% 
+      mutate_at(vars(-rowname),list(~str_replace_all(.,"%","\\\\%"))) %>% 
+      column_to_rownames() %>% 
+      #mutate_all(funs(str_replace_all(.,"%","\\\\%"))) %>% 
+      select(all_of(name_all_grp),sort(tidyselect::peek_vars()))
+    
+    
+    rownames(table_res_pval) <- str_replace_all(rownames(table_res_pval),"_","\\\\_")
+    colnames(table_res_pval) <- str_replace_all(colnames(table_res_pval),"_","\\\\_")
+    
+    
+  } else {table_res_pval <- table_res %>% 
+    select(all_of(name_all_grp),sort(tidyselect::peek_vars()))  }
+  
+  nb_pat_par_grp <- c(nrow(df_one_hot_encode_fonc),
+                      table(df_one_hot_encode_fonc[,name_expo_fonc]))
+  res <- rbind(`Number of patient` = nb_pat_par_grp,table_res_pval)
+  return(res)
+}
+
+#########################################################################################
+##########################################################################################
+# table descriptive des variables
+
+# df_one_hot_encode_fonc généré avec one_hot_fb
+# attention la version p-val true et prevue pour etre print latex ss escape
+table_resume_html <- function(df_one_hot_encode_fonc,
+                              name_expo_fonc,
+                              nom_grp = "clusters", 
+                              p_val = FALSE, 
+                              arrondie = TRUE, 
+                              alpha = 0.05) {
+  
+  # Typage des variables a réusmer en booleen ou numeric
+  # Car normalement df pré_one hot encode
+  table_bool_var <-   df_one_hot_encode_fonc %>% 
+    select(-all_of(name_expo_fonc)) %>% 
+    summarise_all(list(~n_distinct(., na.rm = TRUE))) %>% 
+    t.df %>% 
+    rename(booleen = col_1) %>% 
+    {temp_verif_bool <<- .} %>% 
+    mutate(booleen = booleen <= 2)
+  
+  
+  if (any(temp_verif_bool$booleen < 2)) {
+    print(temp_verif_bool$key[temp_verif_bool$booleen < 2])
+    stop("moins de deux valeurs distinct pour une variables")}
+  
+  
+  
+  name_all_grp <- paste0("all_",nom_grp)
+  
+  
+  all_cluster_descript_var <- df_one_hot_encode_fonc %>% 
+    recup_var_table_res(name_expo_fonc) %>% 
+    #{ifelse(arrondie ,arrondie_df(.), . )} %>% print %>% 
+    mutate(nb_NA = ifelse(nb_NA == 0,"",paste0(" NA : ", nb_NA ))) 
+  
+  
+  nb_grp <- df_one_hot_encode_fonc %>% select(all_of(name_expo_fonc)) %>% 
+    unique() %>% 
+    unlist(use.names = FALSE) %>% 
+    sort
+  
+  
+  group_cluster_descript_var <- lapply(nb_grp, function(x) {
+    col_name <- paste0(nom_grp,"_",x)
+    res <- df_one_hot_encode_fonc  %>%
+      filter(!!sym(name_expo_fonc) == x) %>% 
+      recup_var_table_res(name_expo_fonc) %>% 
+      inner_join(table_bool_var,by = "key") %>% 
+      mutate(nb_NA = ifelse(nb_NA == 0,"",paste0(" NA:", nb_NA ))) %>% 
+      mutate( {{col_name}} := ifelse( booleen
+                                      , paste0(n ,"(",round(pourcent,1), "%)", nb_NA),
+                                      paste0(round(med,2) ,"(",
+                                             round(quart1,1),";",
+                                             round(quart2,1), ")", nb_NA))) %>% 
+      select(all_of(col_name))
+    return(res)
+  }
+  )
+  
+  table_res <- all_cluster_descript_var %>%  
+    inner_join(table_bool_var,by = "key") %>% 
+    mutate( {{name_all_grp}} := ifelse(booleen
+                                 , paste0(n ,"(",round(pourcent,1), "%)",  nb_NA),
+                                 paste0(round(med,2) ,"(",
+                                        round(quart1,1),";", 
+                                        round(quart2,1), ")", nb_NA) ) )  %>% 
+    select(key,all_of(name_all_grp)) %>% 
+    cbind(bind_cols(group_cluster_descript_var)) %>% data.frame(., row.names = 1)
+  
+  table_res <- table_res %>% rename_all(list(~str_replace_all(.,"\\."," ")))
+  # si choix de calculer les p-val 
+  if (p_val) {
+    # prevoir un groupe de plus pour le toutes les catégorie
+    nb_group_pval <-  as.character(c(as.numeric(nb_grp),max(as.numeric(nb_grp)) + 1 ))
+    # création de toutes les combinaisons de groupe a tester
+    combin_grp <- nb_group_pval %>%  combn(2)
+    # Création du groupe supplémentaire tout les groupes en dupliquant la dataframe avec un  groupes de plus
+    df_pval <- df_one_hot_encode_fonc %>% 
+      mutate(!!sym(name_expo_fonc) := max(as.numeric(nb_group_pval))) %>% 
+      rbind(df_one_hot_encode_fonc)
+    
+    
+    non_boolean_var <- table_bool_var %>% filter(!booleen) %>% select(key) %>% unlist(use.names = FALSE)
+    boolean_var <- table_bool_var %>% filter(booleen) %>% select(key) %>% unlist(use.names = FALSE)
+    
+    # création  de la table avec p-value pour chaque combin et rename chaque colonnes a_b 
+    combin_ttest_pval <- apply(combin_grp, 2, function(x)
+      df_pval %>%
+        select(sym(name_expo_fonc),all_of(non_boolean_var)) %>% 
+        #summarise_at(vars(-(sym(name_expo_fonc))),list(~t.test(.[!!sym(name_expo_fonc) == x[1]], .[!!sym(name_expo_fonc)  ==  x[2]])$p.value)) %>% 
+        summarise_at(vars(-(sym(name_expo_fonc))),list(
+          ~t.test(.[!!sym(name_expo_fonc) == x[1]],
+                  .[!!sym(name_expo_fonc)  ==  x[2]])$p.value)) %>% 
+        t.df %>% 
+        rename_at("col_1",list( ~paste0(x[1],"_",x[2])))
+    )
+    combin_chisq_pval <- apply(combin_grp, 2, function(x)
+      df_pval %>%
+        select(sym(name_expo_fonc),all_of(boolean_var)) %>% 
+        dplyr::summarise_at(vars(-sym(name_expo_fonc)),
+
+                            list(~ifelse(sum(.[!!sym(name_expo_fonc) == x[1]],
+                                             na.rm = TRUE) < 8|
+                                           sum(.[!!sym(name_expo_fonc)  ==  x[2]],
+                                               na.rm = TRUE) < 8,
+                                         NA,
+                                         prop.test(
+                              x = c(sum(.[!!sym(name_expo_fonc) == x[1]],
+                                        na.rm = TRUE), 
+                                    sum(.[!!sym(name_expo_fonc)  ==  x[2]],
+                                        na.rm = TRUE)), # compute number of success
+                              n = c(sum(!is.na(.[!!sym(name_expo_fonc) == x[1]])),
+                                    sum(!is.na(.[!!sym(name_expo_fonc)  ==  x[2]])))
+                            )$p.value))
+        ) %>% 
+        t.df %>% 
+        rename_at("col_1",list( ~paste0(x[1],"_",x[2])))
+    )
+    
+    
+    combin_total_pval <- mapply(rbind,combin_chisq_pval,combin_ttest_pval,SIMPLIFY=FALSE)
+    
+    # transformation de la p-value en booléen en avec comme seuil le alpha définis en appliquant une correction de bonneferonni en considérant le nombre total de test nb ligne X nb collones
+    result_pval <- bind_cols(combin_total_pval) %>%
+      rename(key = key...1) %>% 
+      select(key,contains("_")) %>%
+      mutate_at(vars(-key),list(~(. < (alpha / ncol(combin_grp))
+      ))
+      ) %>%  # hypothèse et correction de bonneferonnie 
+      mutate_at(vars(-key), function(x) {
+        x_var <- rlang::enquo(x)
+        ifelse(x , rlang::quo_name(x_var), "non") # remplacement des p-val non signif par une chaine spécifique
+      }) %>% 
+      mutate_at(vars(-key), function(x) {
+        x_var <- rlang::enquo(x)
+        ifelse(is.na(x) , paste0(rlang::quo_name(x_var),"*"),x) # remplacement des p-val non signif par une chaine spécifique
+      })
+
+    # REcherche avec une simili boucle des p-val signif pour chaque colonnnes 
+    # on en lève la chaine spécifique de non corrélation 
+    df_pval_final <- lapply(nb_group_pval, function(x) {
+      result_pval %>% select(key,contains(x)) %>% 
+        mutate_at(vars(contains(x)),list(~paste0("~",str_remove_all(.,paste(c("_",x),
+                                                                            collapse = "|")),
+                                                 "~"))) %>% 
+        unite(!!sym(paste0(nom_grp,"_",x)) ,contains(x),sep = "~,~ ")
+    }
+    ) %>% bind_cols() %>% 
+      rename(key = key...1) %>% 
+      select(key,contains(nom_grp)) %>% 
+      rename(!!sym(name_all_grp) := paste0(nom_grp,"_",
+                                           max(as.numeric(nb_group_pval)))) %>%   
+      mutate_all(list(~str_remove_all(.,"~non~~,~ |~,~~non~"))) %>%  
+      mutate_all(list(~str_remove_all(.,"~non~")))
+    
+    if(df_pval_final %>% 
+       transmute_at(vars(-key),list(~str_detect(.,"non"))) %>%
+       as.matrix() %>% any) {
+      stop("il reste des p-val non traité")}
+    
+    # Gestion des tables latex pour que les différences statisquement significative soit en subscript
+    # en échappant les underscore
+    table_res_pval <-  table_res %>% 
+      rownames_to_column() %>%
+      pivot_longer(-rowname,values_to = "valeur") %>%
+      inner_join((df_pval_final %>% pivot_longer(-key,values_to = "pvalue") ), 
+                 by = c("rowname" = "key", "name" = "name")) %>% 
+      mutate(combin = paste0(valeur,pvalue)) %>% 
+      select(rowname,name,combin) %>% 
+      pivot_wider(names_from = name, values_from = combin) %>% 
+      column_to_rownames()   
+    
+    table_res_pval <- table_res_pval %>% 
+      rownames_to_column() %>% 
+
+      column_to_rownames() %>% 
+      select(all_of(name_all_grp),sort(tidyselect::peek_vars()))
+    
+    
+  } else {table_res_pval <- table_res %>% 
+    select(all_of(name_all_grp),sort(tidyselect::peek_vars()))  }
+  
+  nb_pat_par_grp <- c(nrow(df_one_hot_encode_fonc),
+                      table(df_one_hot_encode_fonc[,name_expo_fonc]))
+  res <- rbind(`Number of patient` = nb_pat_par_grp,table_res_pval)
+  return(res)
+}
+
+#########################################################################################
+function_box_plot_expo_func <- function(donne,expo,out_come){
+  `%>%` <- dplyr::`%>%`
+  donne <- donne %>% as.data.frame()
+  exposure <- donne[,expo] %>% as.factor()
+  test_equal_moy <-  donne %>% dplyr::mutate(expo_fact = as.factor(exposure))  %>%
+    dplyr::select(-all_of(expo))
+  
+  
+  # Création du box plot simple
+  plot_test_res <- test_equal_moy %>%  
+    ggplot2::ggplot( ggplot2::aes(x = expo_fact, y = get(out_come), color = expo_fact)) +
+    ggplot2::geom_boxplot()  + 
+    ggplot2::labs(y = paste0("Final Outcome",
+                             out_come),
+                  x = paste0("Treatment groups ",
+                             expo) ,
+                  caption = "**** = 0, *** < 0.0001, ** < 0.001, * < 0.05") +
+    ggplot2::guides(colour=FALSE) +
+    viridis::scale_color_viridis(discrete= TRUE,
+                                 option = "D")
+  
+  
+  
+  if (length(levels(test_equal_moy$expo_fact)) == 2) { # Si deux modalité T test
+    moy1 <- test_equal_moy %>% dplyr::filter(expo_fact == levels(expo_fact)[1]) # création var t test
+    moy2 <- test_equal_moy %>% dplyr::filter(expo_fact == levels(expo_fact)[2])# création var t test
+    res_testt <-  t.test(moy1[,out_come],moy2[,out_come]) # test
+    sum_ttest <- summary(res_testt) # récupération résultat 
+    
+    plot_test_res <- plot_test_res +  
+      # ajout de la significativité au box plot
+      ggpubr::stat_compare_means(comparisons = list(c(1,2)), tip.length=0.01,
+                                 label = "p.signif", 
+                                 symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), 
+                                                    symbols = c("****", "***", "**", "*", "ns")))
+    
+    # préparation de la liste de sortie de la ffonction
+    test_moy <- list(res_test = res_testt,
+                     plot_test = plot_test_res,
+                     res_annexe = list(summary_ttest = sum_ttest))
+    
+  } else if (length(levels(test_equal_moy$expo_fact)) > 2) { # si plus de 2 facteurs anova nécessaire
+    # Vérifications des hypothèses abandonné kruskalwallis tout le temps la mais a l'avenir reflexion sur ajouter une clause if
+    # potentiellement vérif hypo anova clairement pas vérifiables
+    
+    # Anova test pour produire des résultat annexe notament test de thukey et leven  test
+    anova_T_temp <- aov(eval(parse(text =
+                                     paste(out_come,"~","expo_fact", # récupération des paramètre de la fonction
+                                           sep = "")
+    )), data = test_equal_moy)
+    
+    # Tukey test 
+    tukey_anov <- TukeyHSD(anova_T_temp)
+    # leven test
+    leven_T <- car::leveneTest(eval(parse(text =
+                                            paste(out_come,"~","expo_fact", # récupération des paramètre de la fonction
+                                                  sep = "")
+    )), data = test_equal_moy)
+    # kruskal_waliis car pas vérif hypo trop compliqué
+    kurskal_T <- kruskal.test(eval(parse(text =
+                                           paste(out_come,"~","expo_fact", # récupération des paramètre de la fonction
+                                                 sep = "")
+    )), data = test_equal_moy)
+    sum_anova <- summary(kurskal_T)
+    
+    
+    # Tableau regroupant les moyenne par groupe de facteur d'exposition
+    moyenne_par_grp <- test_equal_moy %>%
+      dplyr::ungroup() %>%
+      dplyr::group_by(expo_fact) %>%
+      dplyr::summarise_at(.vars = dplyr::vars(dplyr::all_of(out_come)),  .funs = list(moy = ~mean(.)))
+    
+    # recherche de tout les comparaison effectuer par le test de tukey
+    liste_facteur_compare_tukey <- rownames(tukey_anov$expo_fact) %>% 
+      str_extract_all(".+(?=-)|(?<=-).+") %>%
+      lapply(., function(x) factor(x, levels = levels(exposure)))
+    #   stringr::str_extract_all("[:digit:]+") 
+    
+    # Boolén visant a ne garder que les les comparaisons des colones au colones adjacente
+    # 1 avec 2 Vrai
+    #2 avec 5 faux
+    bool_facteur_adj <- lapply(liste_facteur_compare_tukey, 
+                               function(x) diff(as.numeric(x))) %>% 
+      unlist() %>% abs(.) == 1
+    
+    # Récupération des comparaison vrai
+    temp_compare_boxplot  <- liste_facteur_compare_tukey[bool_facteur_adj] %>% lapply(., function(x) as.numeric(x))
+    
+    plot_test_res <- plot_test_res + 
+      ggpubr::stat_compare_means(comparisons = temp_compare_boxplot, tip.length=0.01,
+                                 label = "p.signif", 
+                                 symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), 
+                                                    symbols = c("****", "***", "**", "*", "ns")))
+    
+    test_moy <- list(res_test = kurskal_T, # les résultat de kruskalwallis
+                     plot_test = plot_test_res, # les box plot
+                     res_annexe = list(summary_anov = sum_anova , # regroupe les éléments liée a l'anova et au test associé 
+                                       ano_va_ss_hypo = list(tukey = tukey_anov,
+                                                             anova = anova_T_temp,
+                                                             leven_test = leven_T),
+                                       moy_grp = moyenne_par_grp))
+    
+  } else print(paste0("pas de test pour facteur avec ",
+                      length(unique(test$INS_obs_categ))," modalitée(s)"))
+  
+  return(test_moy)
+}
+
+
+#exemple
+
+
+# load("exemple_sebastion_df_exemple.RData") # en exemple tu as les 1000 premiere ligne de mo jeux de données
+# eval_decoupage_cluster <- function_box_plot_expo_func(donne = exemple_box_plot, # data_frame
+#                                                       expo = "INS_obs_categ", # ,nom entre quote de la colones qui définis tes groupes
+#                                                       out_come = "SYM_echelleEpworth") # nom entre quote  de la colones qui définis la variables utilisé pour les boxplot
+# eval_decoupage_cluster$plot_test
+
+
+
+##########################################################################################
+#print vector
+print.vecteur <- function(x){
+  for (name in x) {
+    cat("-", name, '\n')
+  }
+}
+##########################################################################################
+
+# transposé dataframe
+t.df <- function(df,pivot=NULL){
+  if (is.null(pivot)){
+    pivot <- "row_id"
+    df <- df %>% mutate(row_id=paste0("col_",1:nrow(df) ))
+  }
+  res <- df %>% pivot_longer(cols = -!!pivot,"key","value") %>%
+    pivot_wider(names_from = !!pivot,values_from = value)
+  return(res) 
+}
+
+
+
+
+hist_bins <- function(x){
+  bw <- 2 * IQR(x) / length(x)^(1/3)
+  return(bw)}
+
+
+##########################################################################################
+
+# compte le nombres de valeur manquante par variables avec les individus groupé par une variables
+compte_na_par_var_par_grp <- function(df,group_col,colonnes){
+  df_NA_var_fonc <- df %>% select(all_of(group_col),all_of(colonnes)) %>% setDT 
+  nb_val_manq_par_var <- df_NA_var_fonc %>% 
+    .[, lapply(.SD,  function(x) sum(is.na(x))), group_col] %>% 
+    select(-all_of(group_col)) %>% 
+    gather(name,presence_na) %>%  # reshape datset
+    count(name, presence_na) %>%  # count combinations
+    pivot_wider(names_from = name,
+                values_from = n,
+                values_fill = list(n = 0))
+  return(nb_val_manq_par_var)
+}
+
+##########################################################################################
+# test les hypothèse d'une anova 
+
+model.line.hypo <- function(model_test_hypo){
+  #shapi<-shapiro.test(model$residuals)
+  shapi <- suppressWarnings(ks.test(x=model_test_hypo$residuals,y='pnorm'))
+  bartletI <- bartlett.test(residuals(model_test_hypo)~
+                              I(model_test_hypo$model[,2]:
+                                  model_test_hypo$model[,ncol(model_test_hypo$model)])
+                            )$p.value
+  if (shapi$p.value > 0.05){
+    
+    res1<-paste("On ne peut pas rejeter l'hypothèse H0 de normalité des residus la p-value
+              du test de shapiro étant de ", 
+                formatC(shapi$p.value , format = "e", digits = 2) ,
+                "\nce qui est superieur au seuil alpha 5%")
+  } else {
+    res1 <- paste("On rejete l'hypothèse H0 de normalité des residus la p-value
+                du test de shapiro étant de ",
+                  formatC(shapi$p.value , format = "e", digits = 2) ,
+                  "\nce qui est inférieur au seuil alpha 5%")
+  }
+  if (bartletI>0.05){
+    bartlet <- c()
+    for (i in 1:ncol(m$model[,-1])){
+      bartlet <- c(bartlet,bartlett.test(m$model[,1],m$model[,i+1])$p.value)
+      
+    }
+    res2 <- paste(
+    "On ne peut pas rejeter l'hypothèse H0 d'homocédasticité des interactions la p-value
+                du test de bartlet étant de ",
+                  formatC(bartletI , format = "e", digits = 2) ,
+                  "\nce qui est superieur au seuil alpha 5%")
+  }  else {
+    bartlet <- 0
+    res2 <- paste(
+    "On rejete l'hypothèse H0 d'homocédasticité des interactions la p-value du test
+                de bartlet étant de ",
+                  formatC(bartletI , format = "e", digits = 2) ,
+                  "\nce qui est inférieur au seuil alpha 5%")
+  }
+  
+  if (min(bartlet) > 0.05){res3 <- paste(
+  "On ne peut pas rejeter l'hypothèse H0 d'homocédasticité des variances la plus petite
+                                     p-value du test de bartlet étant de ", 
+                                         formatC(min(bartlet) , format = "e", digits = 2) ,"\nce qui est superieur au seuil alpha 5%")
+  }  else {
+    res3 <- paste(
+    "On   rejete l'hypothèse H0 d'homocédasticité des variances la plus petite
+                p-value du test de bartlet étant de ",
+                  formatC(min(bartlet) , format = "e", digits = 2) ,
+                  "\nce qui est inférieur au seuil alpha 5%")
+  }
+  if (((shapi$p.value>0.05) == TRUE) & 
+      ((bartletI > 0.05) == TRUE) &
+      ((min(bartlet) > 0.05) == TRUE)) {
+    resF <- "On accepte toutes les hypothèses du test d'annova à plus de 2 facteurs \n"}
+  else {
+    resF <- "On rejette au moins une hypothèse"
+  }
+  res <- paste(res1,res2,res3,resF,sep = '\n \n')
+  return(cat(res))
+}
+
+
+##########################################################################################
+# reset param graphique
+resetPar <- function() {
+  dev.new()
+  op <- par(no.readonly = TRUE)
+  dev.off()
+  op
+}
+#usage
+#par(resetPar())
+##########################################################################################
+# fait des arrondie + notation scientifique pour les nombres a virugules dans les DF en 
+# conservant les integer telquel
+arrondie_df <- function(df_func){
+  res <-   df_func %>%  
+    rownames_to_column() %>% 
+    mutate_if(is.numeric,
+             # ancien avec probablement un problème dans l'ordre des ifelse
+              # ~ifelse(.%%1==0,as.character(round(.,0)),ifelse((. > 10^3| 1/abs(.) > 10^3 ),
+              #         formatC(., format = "e", digits = 1), # tentative de gestion des nombres 
+              #         as.character(round(.,3))
+              #         )
+              # )
+             ~ifelse(.%%1==0 & . < 10^3,as.character(round(.,0)),ifelse((. > 10^3| 1/abs(.) > 10^3 ),
+                                                             formatC(., format = "e", digits = 1), # tentative de gestion des nombres 
+                                                             as.character(round(.,3))
+             )
+             )
+    ) %>% 
+    column_to_rownames() 
+  return(res)
+}
+##########################################################################################
+# convertie les heures  avec virgule en heure et minute
+roud_hour <- function(decimal_hour){
+  heure <- floor(decimal_hour)
+  minutes <- round(60 * (decimal_hour - floor(decimal_hour)), 0)
+  res <- sprintf("%02d h %02d min", heure, minutes)
+  return(res)
+}
+
+
+#########################################################################################
+# liste les  colonnes iodentiques
+column_comparator <- function(col_a_compar,df_compar_func){ # recherche les collonnes identique et les regroupe sous la forme de nom de collones supprimé : nom de colonnes restant matchant 
+  # Attention une colonnes restante étant égale a 2 coçlonnes supprimé génère donc deux liste
+  liste_colum_identique <-   lapply(seq_along(df_compar_func),function(x) { 
+    col_a_compar_temp <- df_compar_func[,x] %>% unlist( use.names = FALSE)
+    column_compared <- (col_a_compar_temp == col_a_compar ) | 
+      (is.na(col_a_compar_temp) & is.na(col_a_compar ))
+    matching_col <- c(names(df_compar_func[,x]),names(which(apply(column_compared,2,all))))
+  })
+  liste_colum_identique  <- lapply(liste_colum_identique, function(x) x[length(x) > 1]) %>% compact()
+  return(liste_colum_identique)
+}
+#########################################################################################
+# retire les colonnes iodentiques
+distinc_col <- function(df_func,return_list_col_supr = TRUE){
+  column_unique_df <- df_func %>% t.df() %>% distinct_at(vars(-key),.keep_all = TRUE)
+  df_col_unique <- df_func %>% select(all_of(column_unique_df$key))
+  
+  if (return_list_col_supr) {
+    col_supr <- colnames(df_func)[colnames(df_func) %notin% column_unique_df$key]
+    df_col_supr <- df_func %>% select(all_of(col_supr))
+    
+    
+    liste_col_supr <- column_comparator(df_col_supr,df_col_unique)
+    
+    res <- list(df = df_col_unique, colonne_suprime =  liste_col_supr)
+  } else {res <- df_col_unique}
+  return(res)
+}
+#########################################################################################
+# include svg en pdf
+
+include_svg = function(path) {
+  if (knitr::is_latex_output()) {
+    output = xfun::with_ext(path, 'pdf')
+    # you can compare the timestamp of pdf against svg to avoid conversion if necessary
+    system2('rsvg-convert', c('-f', 'pdf', '-a', '-o', shQuote(c(output, path))))
+  } else {
+    output = path
+  }
+  knitr::include_graphics(output)
+}
+
+```
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, eval = FALSE}
+
+##not in##
+#########################################################################################
+
+`%notin%` <- Negate(`%in%`)
+##flow char##
+#########################################################################################
+
+
+flow_chart <- function(base,critere,patient_perdu,table_grp) {
+  nb_crit <- length(critere)
+  
+  debut_du_plot <- paste0("digraph {
+node [fontname = Helvetica, shape = rectangle]; \n", 
+                          paste0("base; ",paste0("critere_",letters[1:nb_crit], collapse = "; "),"; ",
+                                 paste0("perte_",letters[1:nb_crit], collapse = "; "),"\n"),
+                          paste0("secret_node",c(1:nb_crit) ,
+                                 "[height=0, width=0, margin=0,shape=point, style=invis]; \n",collapse = "")
+                          #paste0("secret_node",c(1:nb_crit), collapse = "; ")
+  )
+  
+  
+  
+  elements <- paste0("base [label = '",  "Patient in OSFP base (n = ",
+                     base ," )","'] \n", 
+                     paste0("critere_",letters[1:nb_crit], "  [label = '",
+                            "Remaining Patients  (n = ",
+                            base - cumsum(patient_perdu), " )" ,"' ]", collapse = " \n"),"\n",
+                     paste0("perte_",letters[1:nb_crit], "  [label = '", critere ,  " (n = ",
+                            patient_perdu, " )","' ]", collapse = " \n"),"\n",
+                     paste0("group_obs_",letters[1:length(table_grp)], "  [label = '","Number of patients" ,  " (n = ",
+                            table_grp, " ) \n" ,round((table_grp * 100 )/(base - sum(patient_perdu)),2) ," % ","' ]", collapse = " \n")
+                     
+  )
+  
+  rang <- paste0(paste0("{rank=same;","secret_node",c(1:nb_crit)," ",
+                        "perte_",letters[1:nb_crit],"}",collapse = " \n"),"\n",
+                 "{rank=same;",paste0("group_obs_",letters[1:length(table_grp)],collapse = "  "),"}",
+                 "\n")
+  
+  
+  lien <- paste0(
+    paste0("base -> secret_node1 [arrowhead = none] \n", collapse = "") ,
+    paste0("secret_node",c(1:nb_crit)," -> ","critere_",
+           letters[1:nb_crit]," \n", collapse = "") ,
+    paste0("critere_",letters[1:(nb_crit-1)]," -> ","secret_node",
+           c(2:nb_crit)," [arrowhead = none] \n", collapse = "") , 
+    paste0("secret_node",c(1:nb_crit) ," -> ", "perte_",
+           letters[1:nb_crit], collapse = "\n"),"  \n", 
+    paste0("critere_",letters[nb_crit] ," -> ", "group_obs_", letters[1:length(table_grp)],"[minlen='2.9']" , collapse = "\n") ,"  \n", 
+    collapse = "") 
+  
+  
+  fin_plot <- " \n }" 
+  
+  res <- paste0(debut_du_plot,elements,rang,lien,fin_plot)
+  grViz(res)
+  return(res)
+  }
+
+##function principale du stage##
+#########################################################################################
+calcule_pds_stage <- function(donne,expo,covar,out_come,percentile_tronc = c(0,1,5,10,25,50)/100 ){
+  tempcall <- match.call()
+  
+  
+  fun_trunc <- function(x,.probs) {
+    pmin(pmax(x, quantile(x, probs = .probs)), 
+         quantile(x, probs = 1-.probs))}
+  exposure <- donne[,as.character(tempcall$expo)]
+  mod1 <-   multinom(formula =   eval(parse(text =
+                                              paste("as.numeric(",deparse(tempcall$expo),")", paste0("~ ",paste0(covar, collapse = " + ")), # récupération des paramètre de la fonction
+                                                    sep = "")
+  )),data = donne, na.action = na.fail ,trace = FALSE)
+  
+  res <- data.frame(exposition = exposure , PS = NA) %>% 
+    setNames(c("exposition", "PS")) 
+  
+  
+  res <- res %>% 
+    group_by(exposition) %>%
+    mutate(n = n(),numerator = n / nrow(.)) %>% select(-n)
+  
+  
+  proba_tps_inv <- predict(mod1, type = "probs") %>% 
+    as.data.frame() %>% 
+    rename("1" = names(.)[1]) %>% 
+    mutate("0" = 1 - apply(.,1,sum)) # ajout de la colonnes 0 pour vérifier que ça somme a 1
+  
+  res$PS <- sapply(1:nrow(res), 
+                            function(x) proba_tps_inv[x,as.character(as.numeric(res$exposition[x]))]) # reste a incorporé dans un mutate
+  
+  
+  #SW stabilized weight
+  # W eight
+  #PS propencenty score
+  res <- res %>% mutate(SWeight = numerator/PS, Weight = 1/PS) 
+  
+  
+  test_moy <- function_box_plot_expo_func(donne,
+                                          deparse(substitute(expo)),
+                                          deparse(substitute(out_come))
+                                          )
+  
+  plot_propencity <- res %>% 
+    ggplot(aes(x = PS)) +
+    geom_histogram(binwidth = hist_bins(res$PS)) +
+    facet_wrap( ~ exposition,ncol = 1) + theme_bw()
+  
+  
+  # moyenne et dispersion des poids par groupe tableau a but de présentation 
+  moyenne_pds <- res %>% group_by(exposition)  %>% 
+    summarise("mean_W" = mean(Weight) ,
+              "min_W" = min(Weight),
+              "max_W" = max(Weight),
+              "sd_W" = sd(Weight), 
+              "mean_SW" = mean(SWeight) ,
+              "sd_SW" = sd(SWeight),
+              "min_SW" = min(SWeight),
+              "max_SW" = max(SWeight),
+              .groups = "drop"
+              ) %>% 
+    arrondie_df %>% 
+    #mutate_all(list(~as.character())) %>% 
+    transmute(`Adherence group` = exposition,
+              Mean = paste0(mean_W," / ", mean_SW),
+              `Standart deviation` = paste0(sd_W," / ", sd_SW),
+              Minimum = paste0(min_W," / ", min_SW),
+              Maximum = paste0(max_W," / ", max_SW)
+              )
+  
+  
+  # troncature des poids 
+  poid_trunc_df <- map(percentile_tronc,function(x) fun_trunc(res$Weight,x)) %>% 
+    as.data.frame() %>% 
+    structure(names = paste0("( ",
+                             as.character(percentile_tronc),
+                             ";",
+                             as.character(1 - percentile_tronc),
+                             " )" ) )
+  
+  poid_trunc_stab_df <- map(percentile_tronc,function(x) fun_trunc(res$SWeight,x)) %>% 
+    as.data.frame() %>% 
+    structure(names = paste0("( ",
+                             as.character(percentile_tronc),
+                             ";",
+                             as.character(1 - percentile_tronc),
+                             " )" ) )
+  
+  tableau_pds_trunc <- poid_trunc_df %>% 
+    summarise_all(list(~mean(.),
+                       ~sd(.),
+                       ~min(.),
+                       ~max(.))) %>%
+    t.df() %>% 
+    separate(key, 
+             into = c("truncations",
+                      "fun"),
+             sep = "_") %>% 
+    pivot_wider(names_from = fun ,
+                values_from = col_1)  %>% 
+    rename_all(function(x) c("truncations","mean","standard deviation","minimum","maximum"))
+  
+  tableau_pds_trunc_stab <- poid_trunc_stab_df %>% 
+    summarise_all(list(~mean(.),
+                       ~sd(.),
+                       ~min(.),
+                       ~max(.))) %>%
+    t.df() %>% 
+    separate(key, 
+             into = c("truncations",
+                      "fun"),
+             sep = "_") %>% 
+    pivot_wider(names_from = fun ,
+                values_from = col_1)  %>% 
+    rename_all(function(x) c("truncations","mean","standard deviation","minimum","maximum"))
+  
+  return(list(df = res,
+              res_intermediaire = list(
+                poids = list(
+                  moyenne_pds = moyenne_pds,
+                  poids_tronc = list(poids_trunc = poid_trunc_df,
+                                     poids_trunc_stab = poid_trunc_stab_df),
+                  summary_pds_trunc_stab = tableau_pds_trunc_stab,
+                  summary_pds_trunc = tableau_pds_trunc,
+                  plot_posit = plot_propencity),
+                  regression_modele_pds = list(
+                  regression_temps_ind = mod1,
+                  data_frame_coef = proba_tps_inv),
+                test_covar = test_moy)
+  )
+  )
+}
+
+
+##Imputation si changment de données##
+#########################################################################################
+# a ajouter parralélisation
+impute_si_changement <- function(data_frame_a_verif,path,reimputation = FALSE){
+  df_impute_ex <- tryCatch(read_rds(path),  
+                           error = function(e) data.frame())  
+  colanmes_manq_func <- data_frame_a_verif %>%
+    select_if(data_frame_a_verif %>% 
+                summarise_all(list(~sum(is.na(.)))) != 0) %>% 
+    colnames()
+  
+  if ((all(sort(colnames(data_frame_a_verif)) == sort(colnames(df_impute_ex)) ) & 
+      (nrow(data_frame_a_verif) ==  nrow(df_impute_ex))) & !reimputation) {
+    res <- df_impute_ex
+  } else if (any(sort(colnames(data_frame_a_verif)) != sort(colnames(df_impute_ex))) | reimputation | nrow(df_impute_ex) == 0) {
+    cat("nécessité de réimputer les données 
+      ça va être long + ou - une heure")
+    systeme_exploitation <- Sys.info()[['sysname']]
+    if (systeme_exploitation == "Windows") {
+    imputed_Data_func <- mice::mice(data_frame_a_verif,
+                                    m = 10,
+                                    maxit = 50,
+                                    method = 'pmm',
+                                    printFlag = FALSE)
+    } else if (systeme_exploitation == "Linux") {
+    imputed_Data_func <- mice::parlmice(data_frame_a_verif,
+                                    n.imp.core = 2,
+                                    n.core = parallel::detectCores(),
+                                    m = 10,
+                                    maxit = 50,
+                                    method = 'pmm',
+                                    printFlag = FALSE)
+    } else if (systeme_exploitation == "Darwin") {
+      cat("non testé sur mac donc pas de parrallélisation")
+      imputed_Data_func <- mice::mice(data_frame_a_verif,
+                                      m = 10,
+                                      maxit = 50,
+                                      method = 'pmm',
+                                      printFlag = FALSE)
+    } else {
+      cat("System d'exploitation n'appartenant pas a windows/linux 
+          donc pas de parrallélisation")
+      imputed_Data_func <- mice::mice(data_frame_a_verif,
+                                      m = 10,
+                                      maxit = 50,
+                                      method = 'pmm',
+                                      printFlag = FALSE)
+    }
+    saveRDS(imputed_Data_func, file = paste0("data/genere/imputation_object.rds"))
+    if (!is.null(imputed_Data_func$loggedEvents)) { 
+      print("imputation avec warning")
+      print(imputed_Data_func$loggedEvents)}
+    pdf(file = "graph/Imputation_plot.pdf",width = 32, height = 18 ,onefile = TRUE) 
+    mice::densityplot(imputed_Data_func, data = as.formula(paste0("~",paste0(colanmes_manq_func,collapse = "+")))
+    )
+    dev.off()
+    pdf(file = "graph/manquant_plot.pdf",width = 32, height = 18 ,onefile = TRUE) 
+    visdat::vis_miss(data_frame_a_verif %>% select(all_of(colanmes_manq_func)), cluster = TRUE)
+    dev.off()
+    res <- mice::complete(imputed_Data_func)
+    saveRDS(res, file = paste0("data/genere/data_impute.rds"))
+  } else {stop("Condition non remplie problème fonction")}
+return(res)
+}
+
+##########################################################################################
+# function récupérant les variables pour table descriptive des variables
+
+# df_one_hot_encode_fonc généré avec one_hot_fb
+
+recup_var_table_verif_impute <- function(df_one_hot_encode_fonc,name_expo_fonc){
+  res <-   res <- df_one_hot_encode_fonc %>% 
+    select(-all_of(name_expo_fonc)) %>% 
+    mutate_if(is.factor, ~as.numeric(as.character(.))) %>% # points litigieux j'utilise cette méthode pour convertir mes facteur booleen en numeric a surveilllé a l'avenir
+    summarise_all(list(fonc_med = ~round(median(.,na.rm = TRUE),2),
+                       fonc_quart1 = ~quantile(.,0.25,na.rm = TRUE),
+                       fonc_quart2 = ~quantile(.,0.75,na.rm = TRUE),
+                       fonc_mean = ~mean(.,na.rm = TRUE),
+                       fonc_sd = ~sd(.,na.rm = TRUE),
+                       fonc_min = ~min(.,na.rm = TRUE),
+                       fonc_max = ~max(.,na.rm = TRUE))) %>% 
+    pivot_longer(cols = everything(),
+                 names_to = c(".value", "level"),
+                 names_pattern = "(.*)_fonc_(.*)") %>% 
+    t.df(.,"level") %>% column_to_rownames(var = "key")
+  return(res)
+  }
+
+##########################################################################################
+# Vérifications sommaire de l'imputations plus générations des tables
+
+# df_one_hot_encode_fonc généré avec one_hot_fb
+test_imputation <- function(df__pre_imput_func,df__post_imput_func,name_expo_fonc,check = TRUE) {
+  colanmes_manq_func <- df__pre_imput_func %>%
+    select_if(df__pre_imput_func %>% summarise_all(list(~sum(is.na(.)))) != 0) %>% 
+    colnames()
+  
+  table_pre_imput <-  df__pre_imput_func %>% 
+    select(all_of(colanmes_manq_func),all_of(name_expo_fonc)) %>% 
+    recup_var_table_verif_impute(name_expo_fonc) 
+  table_post_imput <-  df__post_imput_func %>% 
+    select(all_of(colanmes_manq_func),all_of(name_expo_fonc)) %>% 
+    recup_var_table_verif_impute(name_expo_fonc) 
+  
+  table_diff_pre_post <- table_pre_imput - table_post_imput
+  table_diff_prop_pre_post <- table_diff_pre_post / table_pre_imput
+  table_diff_prop_pre_post[table_pre_imput == 0] <- 0
+  
+  if (check == TRUE) {
+    if (length(colanmes_manq_func) == 0)     stop('Pas de valeur manquante dans la DF 
+                                                pré imputation. Tu es sur ?  
+                                                Si oui passe `check = FALSE`')
+    if (any(df__post_imput_func %>% summarise_all(list(~sum(is.na(.)))) != 0)) {
+      cat("les colonnes suivante de la df post imputations contiennent des manquants" ,  
+          df__post_imput_func %>%
+            select_if(df__post_imput_func %>% summarise_all(list(~sum(is.na(.)))) != 0) %>% 
+            colnames() ,
+          "\n pour ne pas faire de check `check = FALSE`")
+      stop('Il reste des manquant dans la DF post imput')}
+    
+    table_pre_imput_col_ss_manq <- df__pre_imput_func %>% 
+      select(-all_of(colanmes_manq_func))  %>% 
+      recup_var_table_verif_impute(name_expo_fonc) 
+    table_post_imput_col_ss_manq <-  df__post_imput_func %>% 
+      select(-all_of(colanmes_manq_func)) %>% 
+      recup_var_table_verif_impute(name_expo_fonc) 
+    diff_diff_de_zero <- table_pre_imput_col_ss_manq - table_post_imput_col_ss_manq != 0
+    
+    if (any(diff_diff_de_zero)) {
+      cat("les valeurs des colones sans valeurs manquantes", 
+          "ont était modifié par l'imputations cela concerne les colones suivante :\n",
+          paste0(names(which(rowSums(diff_diff_de_zero) > 0)),collapse = "  , "),
+          "\n pour ne pas faire de check `check = FALSE`")
+      stop( " différence dans des colonnes non imputé")
+    }
+    if (any(table_diff_prop_pre_post$mean > 0.1)){
+      cat("Il semble avoir eu un problème lors de l'imputations les variables :\n " ,
+          rownames(table_diff_prop_pre_post[table_diff_prop_pre_post$mean > 0.1,]),
+          "\n on subit une variation de lors moyennes supérieurs a 10%")
+      
+    }
+  }
+  res <- list(T_diff = table_diff_pre_post, T_prop_diff = table_diff_prop_pre_post)
+  return(res)
+  }
+
+
+##########################################################################################
+# Fonction qui sert quand j'ai du hard coder un choix qui vérifie que ça n'a pas changé 
+select_manuel_verif <- function(fuc_list_manu,choose_elem){
+  # cette fonction ne sert que de vérifications 
+  if(length(fuc_list_manu) != length(choose_elem)) {
+    print("number of element choose differ with list length")
+    if(length(fuc_list_manu) > length(choose_elem)) {
+      stop("not enougth manual choosen elements")
+    } else { stop("to many manual choosen elements") }
+  } else if(length(fuc_list_manu) == length(choose_elem)){ 
+    # vérif que tout les éléments corresponde bien a ceux dans lequels manuellement choisir
+    bool_in_list <- sapply(seq_along(choose_elem), function(x) choose_elem[x] %in% fuc_list_manu[[x]])
+    if (all(bool_in_list)) {
+      # selection de tout les éléements qui ne sont pas celui manuel
+      res <- sapply(seq_along(choose_elem), function(x) fuc_list_manu[[x]][fuc_list_manu[[x]]  %notin% choose_elem[x]]) %>% 
+        compact %>% unlist
+    } else {
+      stop(paste0("choose elements ",choose_elem[!bool_in_list], " not in list"))
+    } 
+  }
+  return(res)
+}
+
+##########################################################################################
+# Fonction qui sert a rename les colonnes depuis un fichier
+rename_variables <- function(table_func, var_instrum_name = NULL, path_to_var_lab = "data/List_of_variables.xls")  {
+  # récup fichier avec les noms 
+  label_var <- readxl::read_excel(path_to_var_lab) %>% select(Variable,Label) 
+  
+  #On ajoute le fait que c'est le delta epworth
+  label_var$Label[label_var$Variable == "SYM_echelleEpworth"] <- paste0("Delta ",
+                                                                        label_var$Label[label_var$Variable == "SYM_echelleEpworth"])
+  
+
+  # script variable name
+  actual_name <- data.frame(var_name = colnames(table_func)) %>% 
+    mutate(suffix_factor = str_extract(var_name,"\\.+\\d$"), # récupération du cas ou il y a eu one hot encode
+           preffix_all = str_extract(var_name,"^Vis_init_|^Mesure_unique_"), # récupération de mes 3 preffix crée
+           var_ins = str_extract(var_name,"INS_"), # variables instrumentale que tu devras nommer toi meme
+           real_name = str_remove_all(var_name,"INS_|^Vis_init_|^Mesure_unique_|\\.+\\d$") # on enlève tout ce qu'on a détecté
+    )
+  join_table <- actual_name %>% left_join(label_var, by = c("real_name" = "Variable")) # joionture avec les noms
+  # gestions des variables instrumentales
+  name_need_supply <- join_table %>% 
+    filter(!is.na(var_ins)) %>% 
+    select(var_name) %>% 
+    distinct() %>% 
+    unlist(use.names = FALSE)
+  if(is.null(var_instrum_name)){
+    cat("You must supply name for variable you create \n variables you must name are \n")
+    print(name_need_supply) 
+    cat("\n for that ` var_instrum_name = c(\"variable_name\" = \"new name\")`\n")
+    stop()
+  } else if (length(name_need_supply) != length(var_instrum_name)) { 
+    # heler pour les variables manquante ou en trop
+    out_temp <- if_else(condition = length(name_need_supply) > length(var_instrum_name),
+                        true = paste0("Not enought name provide, missing name for \n ",
+                                      paste(name_need_supply[name_need_supply%notin%
+                                                               names(var_instrum_name)], 
+                                            collapse = " ,")),
+                        false = paste0("to many name provide, don't need name for \n ",
+                                       paste(var_instrum_name[names(var_instrum_name)%notin%
+                                                                name_need_supply], 
+                                             collapse = " ,"))
+    )
+    cat(out_temp)
+    stop()
+  } else {
+    instrum_name <- data.frame(var_name = names(var_instrum_name) , Label = var_instrum_name) 
+    complete_name_table <- join_table %>% 
+      left_join(instrum_name,by = "var_name") %>% 
+      mutate(Label = coalesce(Label.x, Label.y)) %>% 
+      select(-contains("Label.")) %>% 
+      mutate(Label = ifelse(!is.na(suffix_factor),
+                            paste0(Label, suffix_factor),
+                            Label),# on remet les indices de facteur
+             Label = ifelse((!is.na(preffix_all)&preffix_all == "Vis_init_"),
+                            paste0("Diagnostic ",Label),
+                            Label)
+      )
+    short_name_table <- complete_name_table$var_name
+    names(short_name_table) <- complete_name_table$Label 
+    res <- table_func %>% rename(all_of(short_name_table))
+  }
+  return(list(table_rename = res,
+               complete_table = complete_name_table ))
+}
+
+
+##########################################################################################
+```
+
